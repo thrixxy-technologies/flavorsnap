@@ -3,6 +3,8 @@ import multer from 'multer';
 import { NextApiRequest, NextApiResponse } from 'next';
 import fs from 'fs';
 import path from 'path';
+import axios from 'axios';
+import FormData from 'form-data';
 
 const uploadDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
@@ -20,7 +22,7 @@ const upload = multer({
     }
     cb(null, true);
   },
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
 
 const apiRoute = nextConnect<NextApiRequest, NextApiResponse>({
@@ -34,18 +36,34 @@ const apiRoute = nextConnect<NextApiRequest, NextApiResponse>({
 
 apiRoute.use(upload.single('image'));
 
-apiRoute.post((req, res) => {
+apiRoute.post(async (req: any, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image uploaded' });
   }
 
-  res.status(200).json({ label: 'Moi Moi' });
-});
+  const filePath = req.file.path;
 
-export default apiRoute;
+  try {
+    const formData = new FormData();
+    formData.append('image', fs.createReadStream(filePath));
+
+    const response = await axios.post('http://localhost:5000/predict', formData, {
+      headers: formData.getHeaders(),
+    });
+
+    const prediction = response.data;
+    res.status(200).json({ label: prediction.label });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Prediction failed', detail: error.message });
+  } finally {
+    fs.unlinkSync(filePath); // delete uploaded file after use
+  }
+});
 
 export const config = {
   api: {
     bodyParser: false,
   },
 };
+
+export default apiRoute;
