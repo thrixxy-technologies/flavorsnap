@@ -123,51 +123,19 @@ def login():
 @app.route('/predict', methods=['POST'])
 @api_key_or_jwt_required
 def predict():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image provided"}), 400
+    start_time = time.time()
     
-    # Mock response preserving existing API contract
-    return jsonify({
-        "label": "Moi Moi",
-        "confidence": 85.7,
-        "all_predictions": [
-            { "label": "Moi Moi", "confidence": 85.7 },
-            { "label": "Akara", "confidence": 9.2 },
-            { "label": "Bread", "confidence": 3.1 }
-        ],
-        "processing_time": 0.234
-    })
+    if 'image' not in request.files:
+
 
 @app.route('/health', methods=['GET'])
-def health():
-    process = psutil.Process(os.getpid())
+def health_check():
+    """Health check endpoint for monitoring"""
+    logger.info("Health check requested")
     return jsonify({
-        "status": "healthy", 
-        "auth_enabled": True, 
-        "version": "1.1.0",
-        "model_loaded": MODEL_LOADED,
-        "system": {
-            "cpu_percent": psutil.cpu_percent(),
-            "memory_usage_mb": process.memory_info().rss / 1024 / 1024
-        }
-    })
-
-@app.route('/health/liveness', methods=['GET'])
-def liveness():
-    return jsonify({"status": "alive"}), 200
-
-@app.route('/health/readiness', methods=['GET'])
-def readiness():
-    return jsonify({"status": "ready" if MODEL_LOADED else "loading"}), 200 if MODEL_LOADED else 503
-
-@app.route('/classes', methods=['GET'])
-def get_classes():
-    return jsonify({
-        "classes": ["Akara", "Bread", "Egusi", "Moi Moi", "Rice and Stew", "Yam"],
-        "count": 6
+        'status': 'healthy',
+        'service': 'flavorsnap-ml-api',
+        'timestamp': time.time()
     })
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    app.run(host='0.0.0.0', port=5000)
