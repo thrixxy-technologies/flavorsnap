@@ -2,6 +2,7 @@ import os
 import uuid
 import logging
 import psutil
+import re
 from functools import wraps
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -11,6 +12,9 @@ from flask_jwt_extended import (
 )
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
+from PIL import Image
+from io import BytesIO
+from werkzeug.utils import secure_filename
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +36,15 @@ jwt = JWTManager(app)
 
 # Global state for model status (Mocked for now)
 MODEL_LOADED = True
+
+# --- Validation Configuration ---
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB in bytes
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp'}
+ALLOWED_MIME_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+MIN_IMAGE_WIDTH = 100
+MIN_IMAGE_HEIGHT = 100
+MAX_IMAGE_WIDTH = 10000  # Prevent extremely large images
+MAX_IMAGE_HEIGHT = 10000
 
 # --- Models ---
 class User(db.Model):
@@ -82,6 +95,112 @@ def role_required(role):
         return decorator
     return wrapper
 
+# --- Validation Helpers ---
+def sanitize_filename(filename):
+    """
+    Sanitize filename to prevent path traversal and malicious names.
+    """
+    # Remove any path components
+    filename = os.path.basename(filename)
+    # Use werkzeug's secure_filename
+    filename = secure_filename(filename)
+    # Remove any remaining special characters except dots, dashes, and underscores
+    filename = re.sub(r'[^\w\s\-\.]', '', filename)
+    # Replace multiple spaces with single dash
+    filename = re.sub(r'\s+', '-', filename)
+    # Limit filename length
+    name, ext = os.path.splitext(filename)
+    if len(name) > 100:
+        name = name[:100]
+    return f"{name}{ext}".lower()
+
+def allowed_file(filename):
+    """
+    Check if file extension is allowed.
+    """
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def validate_image_file(file):
+    """
+    Comprehensive validation of uploaded image file.
+    Returns (is_valid, error_message, image_data)
+    """
+    # Check if file exists
+    if not file:
+        return False, "No file provided", None
+    
+    # Check filename
+    if not file.filename:
+        return False, "No filename provided", None
+    
+    # Validate file extension
+    if not allowed_file(file.filename):
+        return False, f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS).upper()} files are allowed", None
+    
+    # Read file content
+    try:
+        file_content = file.read()
+        file.seek(0)  # Reset file pointer for potential re-reading
+    except Exception as e:
+        logger.error(f"Error reading file: {str(e)}")
+        return False, "Error reading file", None
+    
+    # Check file size
+    file_size = len(file_content)
+    if file_size == 0:
+        return False, "File is empty", None
+    
+    if file_size > MAX_FILE_SIZE:
+        max_mb = MAX_FILE_SIZE / (1024 * 1024)
+        return False, f"File size exceeds maximum limit of {max_mb}MB", None
+    
+    # Validate MIME type by checking file signature
+    try:
+        image = Image.open(BytesIO(file_content))
+        
+        # Verify image format matches allowed types
+        image_format = image.format.lower() if image.format else None
+        if image_format not in ['jpeg', 'png', 'webp']:
+            return False, f"Invalid image format. Only JPEG, PNG, and WebP are supported", None
+        
+        # Check image dimensions
+        width, height = image.size
+        
+        if width < MIN_IMAGE_WIDTH or height < MIN_IMAGE_HEIGHT:
+            return False, f"Image dimensions too small. Minimum size is {MIN_IMAGE_WIDTH}x{MIN_IMAGE_HEIGHT}px", None
+        
+        if width > MAX_IMAGE_WIDTH or height > MAX_IMAGE_HEIGHT:
+            return False, f"Image dimensions too large. Maximum size is {MAX_IMAGE_WIDTH}x{MAX_IMAGE_HEIGHT}px", None
+        
+        # Verify image integrity by attempting to load it
+        image.verify()
+        
+        # Re-open image after verify (verify closes the file)
+        image = Image.open(BytesIO(file_content))
+        
+        # Check for potential malicious content
+        # Ensure image mode is valid
+        if image.mode not in ['RGB', 'RGBA', 'L', 'P']:
+            return False, "Unsupported image mode", None
+        
+        # Additional security: Check for excessively large number of frames (for animated images)
+        if hasattr(image, 'n_frames') and image.n_frames > 1:
+            return False, "Animated images are not supported", None
+        
+        return True, None, {
+            'format': image_format,
+            'size': file_size,
+            'dimensions': (width, height),
+            'mode': image.mode
+        }
+        
+    except Image.UnidentifiedImageError:
+        return False, "File is not a valid image or format is not supported", None
+    except Exception as e:
+        logger.error(f"Error validating image: {str(e)}")
+        return False, "Invalid or corrupted image file", None
+
 # --- Routes ---
 @app.route('/register', methods=['POST'])
 def register():
@@ -122,10 +241,37 @@ def login():
 @app.route('/predict', methods=['POST'])
 @api_key_or_jwt_required
 def predict():
+    # Check if image file is present in request
     if 'image' not in request.files:
-        return jsonify({"error": "No image provided"}), 400
+        return jsonify({
+            "error": "No image provided",
+            "code": "MISSING_FILE",
+            "message": "Please upload an image file"
+        }), 400
+    
+    file = request.files['image']
+    
+    # Validate the uploaded file
+    is_valid, error_message, image_data = validate_image_file(file)
+    
+    if not is_valid:
+        return jsonify({
+            "error": error_message,
+            "code": "INVALID_FILE",
+            "message": error_message
+        }), 400
+    
+    # Sanitize filename
+    original_filename = file.filename
+    safe_filename = sanitize_filename(original_filename)
+    
+    logger.info(f"Valid image uploaded: {safe_filename}, "
+                f"size: {image_data['size']} bytes, "
+                f"dimensions: {image_data['dimensions']}, "
+                f"format: {image_data['format']}")
     
     # Mock response preserving existing API contract
+    # In production, this would process the image with the ML model
     return jsonify({
         "label": "Moi Moi",
         "confidence": 85.7,
@@ -134,7 +280,17 @@ def predict():
             { "label": "Akara", "confidence": 9.2 },
             { "label": "Bread", "confidence": 3.1 }
         ],
-        "processing_time": 0.234
+        "processing_time": 0.234,
+        "metadata": {
+            "filename": safe_filename,
+            "original_filename": original_filename,
+            "size_bytes": image_data['size'],
+            "dimensions": {
+                "width": image_data['dimensions'][0],
+                "height": image_data['dimensions'][1]
+            },
+            "format": image_data['format']
+        }
     })
 
 @app.route('/health', methods=['GET'])
