@@ -9,7 +9,11 @@ import os
 pn.extension()
 
 # Load model
-model_path = 'models/best_model.pth'
+model_path = 'model.pth'
+
+if not os.path.exists(model_path):
+    raise FileNotFoundError(f"Model not found at {model_path}")
+
 class_names = ['Akara', 'Bread', 'Egusi', 'Moi Moi', 'Rice and Stew', 'Yam']
 model = models.resnet18(weights='IMAGENET1K_V1')
 model.fc = torch.nn.Linear(model.fc.in_features, len(class_names))
