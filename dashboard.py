@@ -7,9 +7,14 @@ import io
 import os
 
 pn.extension()
+model_path = ''
 
 # Load model
-model_path = 'model.pth'
+if os.environ.get('LEGACY_MODEL').lower() == 'true':
+    print("Using legacy model (ResNet18 with custom weights)")
+    model_path = 'models/best_model.pth'
+else:
+    model_path = 'model.pth'
 
 if not os.path.exists(model_path):
     raise FileNotFoundError(f"Model not found at {model_path}")

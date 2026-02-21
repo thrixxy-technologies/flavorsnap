@@ -23,6 +23,7 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key')
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-jwt-secret')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///users.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['LEGACY_MODEL'] = os.environ.get('LEGACY_MODEL', 'false').lower() == 'true'
 
 # Initialize Extensions
 CORS(app, origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")])
