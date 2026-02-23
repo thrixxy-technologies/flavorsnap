@@ -391,6 +391,51 @@ curl -X POST \
 }
 ```
 
+#### GET /predictions
+
+List predictions with pagination, filtering, and sorting.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | int | 1 | Page number (offset-based) |
+| `limit` | int | 20 | Items per page (max 100) |
+| `cursor` | string | — | Opaque cursor for cursor-based pagination (from previous `next_cursor`) |
+| `label` | string | — | Filter by label (exact or comma-separated list) |
+| `confidence_min` | float | — | Minimum confidence (0–100) |
+| `confidence_max` | float | — | Maximum confidence (0–100) |
+| `created_after` | ISO datetime | — | Filter predictions after this time |
+| `created_before` | ISO datetime | — | Filter predictions before this time |
+| `sort_by` | string | `created_at` | Sort field: `created_at`, `label`, `confidence`, `id` |
+| `order` | string | `desc` | Sort order: `asc`, `desc` |
+
+**Example (offset):**
+
+```bash
+curl "http://localhost:5000/predictions?page=1&limit=20&sort_by=created_at&order=desc"
+```
+
+**Example (cursor):**
+
+```bash
+curl "http://localhost:5000/predictions?cursor=eyJ...&limit=20"
+```
+
+**Response:**
+
+```json
+{
+  "predictions": [
+    { "id": "uuid", "label": "Moi Moi", "confidence": 85.0, "created_at": "2025-02-23T12:00:00+00:00" }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 42, "total_pages": 3 },
+  "next_cursor": "base64...",
+  "prev_cursor": null,
+  "count": 20
+}
+```
+
 #### GET /health
 
 Check API health status.

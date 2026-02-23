@@ -1,5 +1,6 @@
 import { useRouter } from "next/router";
 import { useTranslation } from "next-i18next";
+import { analytics } from "@/utils/analytics";
 
 const localeLabels: Record<string, string> = {
   en: "English",
@@ -15,6 +16,10 @@ export default function LanguageSwitcher() {
 
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLocale = e.target.value;
+    
+    // Track language change
+    analytics.trackLanguageChange(newLocale);
+    
     router.push({ pathname, query }, asPath, { locale: newLocale });
   };
 

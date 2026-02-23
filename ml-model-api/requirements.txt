@@ -3,7 +3,9 @@ flask-cors==4.0.0
 flask-jwt-extended==4.5.3
 flask-sqlalchemy==3.1.1
 flask-bcrypt==1.0.1
+Flask-Limiter==3.5.0
 torch
 torchvision
 pillow
 psutil
+marshmallow==3.21.3

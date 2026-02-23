@@ -1,4 +1,5 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { analytics } from '@/utils/analytics';
 
 interface Props {
   children: ReactNode;
@@ -9,34 +10,51 @@ interface State {
   hasError: boolean;
   error?: Error;
   errorInfo?: ErrorInfo;
+  errorCount: number;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, errorCount: 0 };
   }
 
   static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
+    return { hasError: true, error, errorCount: 0 };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    this.setState({
+    this.setState((prevState) => ({
       error,
-      errorInfo
-    });
+      errorInfo,
+      errorCount: prevState.errorCount + 1,
+    }));
+
+    // Track error in analytics
+    analytics.trackError(error, errorInfo, true);
 
     // Log error to console in development
     if (process.env.NODE_ENV === 'development') {
       console.error('ErrorBoundary caught an error:', error, errorInfo);
     }
 
-    // TODO: Add error logging service integration
-    // logErrorToService(error, errorInfo);
+    // Track repeated errors
+    if (this.state.errorCount > 2) {
+      analytics.event({
+        action: 'repeated_error',
+        category: 'Error',
+        label: error.message,
+        value: this.state.errorCount,
+      });
+    }
   }
 
   handleRetry = () => {
+    analytics.event({
+      action: 'error_retry',
+      category: 'User_Interaction',
+      label: this.state.error?.message || 'unknown',
+    });
     this.setState({ hasError: false, error: undefined, errorInfo: undefined });
   };
 

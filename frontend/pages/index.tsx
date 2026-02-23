@@ -1,93 +1,78 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useRef, useState, useEffect } from "react";
-import Head from "next/head";
+import { useRef, useState } from "react";
 import { api } from "@/utils/api";
 import { ErrorMessage } from "@/components/ErrorMessage";
 import { useTranslation } from "next-i18next";
 import { serverSideTranslations } from "next-i18next/serverSideTranslations";
 import type { GetStaticProps } from "next";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation } from "@tanstack/react-query";
-import * as z from "zod";
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const ACCEPTED_IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
-
-const validationSchema = z.object({
-  image: z
-    .any()
-    .refine((files) => files?.length === 1, "Image is required.")
-    .refine((files) => files?.[0]?.size <= MAX_FILE_SIZE, `Max file size is 10MB.`)
-    .refine(
-      (files) => ACCEPTED_IMAGE_TYPES.includes(files?.[0]?.type),
-      "Only .jpg, .jpeg, .png and .webp formats are supported."
-    ),
-});
-
-type FormValues = z.infer<typeof validationSchema>;
+import { compressImage, validateImageFile, formatFileSize } from "@/utils/imageCompression";
+import Layout from "@/components/Layout";
+import Head from "next/head";
 
 export default function Classify() {
   const { t } = useTranslation("common");
-  const [preview, setPreview] = useState<string | null>(null);
+  const [image, setImage] = useState<string | null>(null);
+  const [originalFile, setOriginalFile] = useState<File | null>(null);
+  const [compressedFile, setCompressedFile] = useState<File | null>(null);
+  const [compressionInfo, setCompressionInfo] = useState<{ originalSize: number; compressedSize: number; ratio: number } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [compressing, setCompressing] = useState(false);
+  const [compressionProgress, setCompressionProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const [classification, setClassification] = useState<any>(null);
-  const [apiError, setApiError] = useState<string | null>(null);
-  const hiddenInputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const {
-    register,
-    handleSubmit,
-    watch,
-    formState: { errors },
-    reset,
-  } = useForm<FormValues>({
-    resolver: zodResolver(validationSchema),
-    mode: "onChange",
-  });
+  const handleImageChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-  const imageFiles = watch("image");
-  const { ref: registerRef, ...registerRest } = register("image");
-
-  useEffect(() => {
-    if (imageFiles && imageFiles.length > 0) {
-      const file = imageFiles[0];
-      if (file.type && file.type.startsWith("image/")) {
-        const objectUrl = URL.createObjectURL(file);
-        setPreview(objectUrl);
-        setClassification(null);
-        setApiError(null);
-        return () => URL.revokeObjectURL(objectUrl);
-      }
-    } else {
-      setPreview(null);
+    // Validate file
+    const validation = validateImageFile(file);
+    if (!validation.isValid) {
+      setError(validation.error || t('invalid_file'));
+      return;
     }
-  }, [imageFiles]);
 
-  const mutation = useMutation({
-    mutationFn: async (formData: FormData) => {
-      const response = await api.post('/api/classify', formData, {
-        retries: 2,
-        retryDelay: 1000,
+    setOriginalFile(file);
+    setError(null);
+    setClassification(null);
+    setCompressing(true);
+    setCompressionProgress(0);
+
+    try {
+      const result = await compressImage(file, {}, (progress) => {
+        setCompressionProgress(progress);
       });
 
-      if (response.error) {
-        throw new Error(response.error);
-      }
-      return response.data;
-    },
-    onSuccess: (data) => {
-      setClassification(data);
-    },
-    onError: (error: Error) => {
-      setApiError(error.message);
-    },
-  });
+      setCompressedFile(result.compressedFile);
+      setCompressionInfo({
+        originalSize: result.originalSize,
+        compressedSize: result.compressedSize,
+        ratio: result.compressionRatio,
+      });
 
-  const onSubmit = (data: FormValues) => {
-    setApiError(null);
-    setClassification(null);
-    const file = data.image[0];
+      const imageUrl = URL.createObjectURL(result.compressedFile);
+      setImage(imageUrl);
+
+      console.log(`Image compressed: ${formatFileSize(result.originalSize)} → ${formatFileSize(result.compressedSize)} (${result.compressionRatio.toFixed(1)}% reduction)`);
+    } catch (err) {
+      setError(t('compression_failed'));
+      console.error('Compression error:', err);
+    } finally {
+      setCompressing(false);
+      setCompressionProgress(0);
+    }
+  };
+
+  const handleClassify = async () => {
+    if (!image || !compressedFile) return;
+
+    setLoading(true);
+    setError(null);
+
+    // Track classify button click
+    analytics.trackButtonClick('classify_food', 'main_page');
 
     // Announce to screen readers that classification is starting
     const announcement = document.getElementById('classification-announcement');
@@ -95,133 +80,142 @@ export default function Classify() {
       announcement.textContent = t('classifying');
     }
 
-    const formData = new FormData();
-    formData.append("image", file);
+    try {
+      // Create FormData to send the compressed file
+      const formData = new FormData();
+      formData.append('image', compressedFile);
 
-    mutation.mutate(formData);
+      const response = await fetch('/api/classify', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      if (result.error) {
+        setError(result.error);
+      } else {
+        setClassification(result);
+      }
+    } catch (err) {
+      setError(t('error_classify_retry'));
+      console.error('Classification error:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6">
-      <Head>
-        <title>{t("app_title", "FlavorSnap - AI Food Classification")}</title>
-        <meta name="description" content={t("app_description", "Snap a picture of your food and let AI identify the dish instantly! Specialized in Nigerian cuisine.")} />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="/favicon.ico" />
+    <Layout title="FlavorSnap - AI Food Classification" description="Instantly identify food with AI-powered image recognition">
+      <div className="flex flex-col items-center justify-center p-6">
+        <h1 className="text-3xl font-bold mb-6">{t("snap_your_food")} 🍛</h1>
 
-        {/* Open Graph */}
-        <meta property="og:title" content="FlavorSnap - AI Food Classification" />
-        <meta property="og:description" content="Snap a picture of your food and let AI identify the dish instantly!" />
-        <meta property="og:type" content="website" />
-        <meta property="og:url" content="https://flavorsnap.vercel.app" />
-        <meta property="og:image" content="https://flavorsnap.vercel.app/icons/icon-512x512.png" />
-
-        {/* Twitter */}
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content="FlavorSnap" />
-        <meta name="twitter:description" content="AI-powered food recognition." />
-        <meta name="twitter:image" content="https://flavorsnap.vercel.app/icons/icon-512x512.png" />
-
-        {/* Structured Data */}
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{
-            __html: JSON.stringify({
-              "@context": "https://schema.org",
-              "@type": "WebApplication",
-              "name": "FlavorSnap",
-              "applicationCategory": "LifestyleApplication",
-              "operatingSystem": "Any",
-              "description": "AI-powered food recognition and calorie tracking application specialized in Nigerian cuisine.",
-              "image": "https://flavorsnap.vercel.app/icons/icon-512x512.png",
-              "offers": {
-                "@type": "Offer",
-                "price": "0",
-                "priceCurrency": "USD"
-              }
-            })
-          }}
+        {/* Screen reader announcements */}
+        <div
+          id="classification-announcement"
+          role="status"
+          aria-live="polite"
+          className="sr-only"
         />
-      </Head>
-      <div className="absolute top-4 end-4">
-        <LanguageSwitcher />
-      </div>
 
-      <h1 className="text-3xl font-bold mb-6">{t("snap_your_food")} 🍛</h1>
+        <div
+          id="error-announcement"
+          role="alert"
+          aria-live="assertive"
+          className="sr-only"
+        />
 
-      {/* Screen reader announcements */}
-      <div
-        id="classification-announcement"
-        role="status"
-        aria-live="polite"
-        className="sr-only"
-      />
-
-      <div
-        id="error-announcement"
-        role="alert"
-        aria-live="assertive"
-        className="sr-only"
-      />
-
-      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col items-center w-full max-w-md">
         <input
           type="file"
           accept="image/*"
           capture="environment"
+          ref={fileInputRef}
+          onChange={handleImageChange}
           className="hidden"
-          {...registerRest}
-          ref={(e) => {
-            registerRef(e);
-            hiddenInputRef.current = e;
-          }}
           aria-label={t("select_image_file")}
         />
 
         <button
-          type="button"
-          onClick={() => hiddenInputRef.current?.click()}
+          onClick={() => fileInputRef.current?.click()}
+          onKeyPress={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              fileInputRef.current?.click();
+            }
+          }}
           className="bg-accent text-white px-6 py-3 rounded-full mb-4 focus:outline-none focus:ring-4 focus:ring-accent/50 focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
           aria-label={t("open_camera")}
         >
           {t("open_camera")}
         </button>
 
-        {errors.image && (
-          <div className="mb-4 w-full">
-            <ErrorMessage
-              message={errors.image.message as string}
-              onDismiss={() => reset({ image: undefined })}
-            />
+        {compressing && (
+          <div className="mt-6 text-center">
+            <div className="mb-2">
+              <span className="text-sm font-medium">{t('compressing_image')}...</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2.5 mb-2">
+              <div
+                className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                style={{ width: `${compressionProgress}%` }}
+                role="progressbar"
+                aria-valuenow={compressionProgress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label={t('compression_progress', { progress: compressionProgress })}
+              />
+            </div>
+            <span className="text-xs text-gray-600">{compressionProgress}%</span>
           </div>
         )}
 
-        {apiError && (
-          <div className="mb-4 w-full">
-            <ErrorMessage
-              message={apiError}
-              onRetry={handleSubmit(onSubmit)}
-              onDismiss={() => setApiError(null)}
-            />
-          </div>
+        {error && (
+          <ErrorMessage
+            message={error}
+            onRetry={() => handleClassify()}
+            onDismiss={() => setError(null)}
+          />
         )}
+        {image && (
+          <div className="mt-6 text-center" role="region" aria-label={t("image_preview")}>
+            {compressionInfo && (
+              <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="font-medium">{t('compression_info')}:</span>
+                  <span className="text-green-600 font-medium">
+                    {compressionInfo.ratio.toFixed(1)}% {t('reduced')}
+                  </span>
+                </div>
+                <div className="text-xs text-gray-600">
+                  {t('original_size')}: {formatFileSize(compressionInfo.originalSize)} → {t('compressed_size')}: {formatFileSize(compressionInfo.compressedSize)}
+                </div>
+              </div>
+            )}
 
-        {preview && !errors.image && (
-          <div className="mt-6 text-center w-full" role="region" aria-label={t("image_preview")}>
             <img
-              src={preview}
+              src={image}
               alt={t("preview_alt")}
               className="rounded-xl shadow-md max-w-sm mx-auto mb-4"
             />
 
             <button
-              type="submit"
-              disabled={mutation.isPending}
+              onClick={handleClassify}
+              onKeyPress={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  handleClassify();
+                }
+              }}
+              disabled={loading || compressing}
               className="bg-blue-600 text-white px-6 py-3 rounded-full hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed focus:outline-none focus:ring-4 focus:ring-blue-600/50 focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
-              aria-label={mutation.isPending ? t('classifying') : t('classify_food')}
-              aria-describedby={mutation.isPending ? 'classification-announcement' : undefined}
+              aria-label={loading ? t('classifying') : t('classify_food')}
+              aria-describedby={loading ? 'classification-announcement' : undefined}
             >
-              {mutation.isPending ? t('classifying') : t('classify_food')}
+              {loading ? t('classifying') : t('classify_food')}
             </button>
 
             {classification && (
@@ -236,13 +230,12 @@ export default function Classify() {
             )}
           </div>
         )}
-      </form>
-    </div>
+      </div>
+    </Layout>
   );
-}
 
-export const getStaticProps: GetStaticProps = async ({ locale }) => ({
-  props: {
-    ...(await serverSideTranslations(locale ?? "en", ["common"])),
-  },
-});
+  export const getStaticProps: GetStaticProps = async ({ locale }) => ({
+    props: {
+      ...(await serverSideTranslations(locale ?? "en", ["common"])),
+    },
+  });
