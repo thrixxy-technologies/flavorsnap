@@ -15,6 +15,7 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from marshmallow import Schema, fields, validate
+import security
 
 # Attempt to import custom logger, fallback to default if missing
 try:
@@ -25,7 +26,8 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
+# Use hardened CORS config from security module
+CORS(app, **security.get_cors_config())
 
 # --- ML MODEL SETUP ---
 # Path logic: model.pth is in the parent directory of ml-model-api/
@@ -65,9 +67,13 @@ preprocess = transforms.Compose([
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["200 per day", "50 per hour"],
+    # 100 requests per minute per IP (acceptance criteria)
+    default_limits=["200 per day", "100 per minute"],
     storage_uri="memory://",
 )
+
+# Register security headers on every response
+app.after_request(security.add_security_headers)
 
 def get_request_id() -> str:
     return request.headers.get("X-Request-ID", uuid.uuid4().hex)
@@ -82,15 +88,21 @@ _predictions_store = []
 
 # --- ROUTES ---
 @app.route('/predict', methods=['POST'])
-@limiter.limit("10 per minute")
+@limiter.limit("100 per minute")
+@security.require_api_key
 def predict():
     start_time = time.time()
     
     # 1. Validation
     if 'image' not in request.files:
         return jsonify({'error': 'No image provided'}), 400
-    
+
     file = request.files['image']
+
+    # Validate file type and size before any processing
+    valid, err_msg = security.validate_image_file(file)
+    if not valid:
+        return jsonify({'error': 'Invalid image file', 'details': err_msg}), 400
     
     try:
         # 2. Inference Logic

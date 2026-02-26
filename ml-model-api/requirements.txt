@@ -9,3 +9,4 @@ torchvision
 pillow
 psutil
 marshmallow==3.21.3
+# Optional: bleach==6.1.0  (enhances HTML sanitization in security.py; works without it)
