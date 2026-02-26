@@ -10,3 +10,6 @@ pillow
 psutil
 marshmallow==3.21.3
 # Optional: bleach==6.1.0  (enhances HTML sanitization in security.py; works without it)
+prometheus-client==0.19.0
+PyYAML==6.0.1
+

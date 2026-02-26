@@ -16,6 +16,12 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from marshmallow import Schema, fields, validate
 import security
+from monitoring import MonitoringMiddleware, track_inference, update_model_accuracy
+from swagger_setup import setup_swagger
+from category_routes import category_bp
+from xai_routes import xai_bp, initialize_explainer
+from social_routes import social_bp
+
 
 # Attempt to import custom logger, fallback to default if missing
 try:
@@ -28,6 +34,21 @@ except ImportError:
 app = Flask(__name__)
 # Use hardened CORS config from security module
 CORS(app, **security.get_cors_config())
+
+# Initialize monitoring
+monitoring = MonitoringMiddleware(app)
+
+# Initialize Swagger UI
+setup_swagger(app)
+
+# Register category management blueprint
+app.register_blueprint(category_bp)
+
+# Register XAI blueprint
+app.register_blueprint(xai_bp)
+
+# Register social sharing blueprint
+app.register_blueprint(social_bp)
 
 # --- ML MODEL SETUP ---
 # Path logic: model.pth is in the parent directory of ml-model-api/
@@ -55,6 +76,9 @@ def load_ml_components():
 
 # Load once on startup
 ML_MODEL, FOOD_LABELS = load_ml_components()
+
+# Initialize XAI explainer after model is loaded
+initialize_explainer(ML_MODEL, FOOD_LABELS)
 
 # Image Preprocessing Transform
 preprocess = transforms.Compose([
@@ -90,6 +114,9 @@ _predictions_store = []
 @app.route('/predict', methods=['POST'])
 @limiter.limit("100 per minute")
 @security.require_api_key
+@limiter.limit("10 per minute")
+@track_inference
+
 def predict():
     start_time = time.time()
     
