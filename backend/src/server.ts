@@ -3,6 +3,9 @@ import mysql from 'mysql2/promise';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import path from 'path';
+import uploadRouter from './routes/upload';
+import analyzeRouter from './routes/analyze';
 
 dotenv.config();
 
@@ -12,6 +15,13 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+// API routes
+app.use('/api/upload', uploadRouter);
+app.use('/api/analyze', analyzeRouter);
 
 // MySQL Connection Pool
 export const db = mysql.createPool({

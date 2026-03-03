@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { analytics } from '@/utils/analytics';
+import { errorHandler, ErrorType } from '@/lib/error-handler';
 
 interface Props {
   children: ReactNode;
@@ -11,22 +12,46 @@ interface State {
   error?: Error;
   errorInfo?: ErrorInfo;
   errorCount: number;
+  customError?: any;
+  retryCount: number;
+  maxRetries: number;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
-    this.state = { hasError: false, errorCount: 0 };
+    this.state = { 
+      hasError: false, 
+      errorCount: 0,
+      retryCount: 0,
+      maxRetries: 3
+    };
   }
 
   static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error, errorCount: 0 };
+    return { 
+      hasError: true, 
+      error, 
+      errorCount: 0,
+      retryCount: 0,
+      maxRetries: 3
+    };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    const customError = errorHandler.createError(ErrorType.CLASSIFICATION_ERROR, error.message, {
+      userMessage: 'Something went wrong while processing your request. Please try again.',
+      context: {
+        componentStack: errorInfo.componentStack,
+        errorBoundary: true,
+        errorCount: this.state.errorCount + 1,
+      },
+    });
+
     this.setState((prevState) => ({
       error,
       errorInfo,
+      customError,
       errorCount: prevState.errorCount + 1,
     }));
 
@@ -49,12 +74,29 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   handleRetry = () => {
+    if (this.state.retryCount >= this.state.maxRetries) {
+      // Max retries reached, suggest page reload
+      return;
+    }
+
     analytics.event({
       action: 'error_retry',
       category: 'User_Interaction',
       label: this.state.error?.message || 'unknown',
+      value: this.state.retryCount + 1,
     });
-    this.setState({ hasError: false, error: undefined, errorInfo: undefined });
+
+    this.setState((prevState) => ({
+      hasError: false, 
+      error: undefined, 
+      errorInfo: undefined,
+      customError: undefined,
+      retryCount: prevState.retryCount + 1,
+    }));
+  };
+
+  canRetry = () => {
+    return this.state.retryCount < this.state.maxRetries;
   };
 
   render() {
@@ -86,20 +128,38 @@ export class ErrorBoundary extends Component<Props, State> {
               <p className="mb-6 text-gray-600">
                 We&apos;re sorry, but something unexpected happened. The error has been logged and we&apos;ll look into it.
               </p>
+              
+              {!this.canRetry() && (
+                <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+                  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+                    Multiple retry attempts failed. Please try reloading the page.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3">
+              {this.canRetry() && (
+                <button
+                  onClick={this.handleRetry}
+                  className="w-full bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2"
+                >
+                  Try Again {this.state.retryCount > 0 && `(${this.state.retryCount}/${this.state.maxRetries})`}
+                </button>
+              )}
+              
               <button
                 onClick={this.handleRetry}
                 className="min-h-[44px] w-full rounded-lg bg-blue-600 px-4 py-2 text-white transition-colors hover:bg-blue-700"
               >
-                Try Again
+                Reload Page
               </button>
+              
               <button
                 onClick={() => window.location.reload()}
                 className="min-h-[44px] w-full rounded-lg bg-gray-200 px-4 py-2 text-gray-800 transition-colors hover:bg-gray-300"
               >
-                Reload Page
+                Go Back
               </button>
             </div>
 
@@ -113,10 +173,17 @@ export class ErrorBoundary extends Component<Props, State> {
                     {this.state.error.toString()}
                   </div>
                   {this.state.errorInfo && (
-                    <pre className="whitespace-pre-wrap">
-                      {this.state.errorInfo.componentStack}
-                    </pre>
+                    <>
+                      <div className="font-semibold mb-2">Component Stack:</div>
+                      <pre className="whitespace-pre-wrap">
+                        {this.state.errorInfo.componentStack}
+                      </pre>
+                    </>
                   )}
+                  
+                  <div className="font-semibold mb-2 mt-3">Retry Info:</div>
+                  <div>Attempts: {this.state.retryCount}/{this.state.maxRetries}</div>
+                  <div>Error Count: {this.state.errorCount}</div>
                 </div>
               </details>
             )}

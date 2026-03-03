@@ -1,0 +1,74 @@
+groups:
+  - name: flavorsnap_alerts
+    rules:
+      - alert: HighAPILatency
+        expr: flask_http_request_duration_seconds{quantile="0.95"} > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API latency detected"
+          description: "95th percentile latency is {{ $value }}s for endpoint {{ $labels.endpoint }}"
+
+      - alert: APIErrorRate
+        expr: rate(flask_http_request_exceptions_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High API error rate"
+          description: "Error rate is {{ $value }} errors/sec for endpoint {{ $labels.endpoint }}"
+
+      - alert: ModelInferenceFailure
+        expr: increase(model_inference_failures_total[5m]) > 5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model inference failures detected"
+          description: "{{ $value }} inference failures in the last 5 minutes"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}%"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space is {{ $value }}% full"
+
+      - alert: ModelAccuracyDegradation
+        expr: model_accuracy < 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model accuracy degradation"
+          description: "Model accuracy has dropped to {{ $value }}"
+
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service is down"
+          description: "Service {{ $labels.job }} on {{ $labels.instance }} is down"

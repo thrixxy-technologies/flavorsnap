@@ -1,9 +1,11 @@
+
 ﻿/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useRef, useState, useEffect } from "react";
 import Head from "next/head";
 import { api } from "@/utils/api";
 import Image from "next/image"; // Added for Hero Image
-import { ErrorMessage } from "@/components/ErrorMessage";
+omponents/ErrorMessage";
+import { ImageUpload } from "@/components/ImageUpload";
 import { useTranslation } from "next-i18next";
 import { serverSideTranslations } from "next-i18next/serverSideTranslations";
 import type { GetStaticProps } from "next";
@@ -13,7 +15,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
 import Layout from "@/components/Layout";
 import * as z from "zod";
-
+import { errorHandler, ErrorType, ErrorInfo } from '@/lib/error-handler';
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const ACCEPTED_IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
 const MAX_MOBILE_DIMENSION = 1280;
@@ -65,12 +67,13 @@ async function optimizeImageForUpload(file: File): Promise<File> {
   }
 }
 
+
 export default function Classify() {
   const { t } = useTranslation("common");
   const [image, setImage] = useState<string | null>(null);
-  const [file, setFile] = useState<File | null>(null); // Added to store actual file for API
+  const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorInfo | null>(null);
   const [classification, setClassification] = useState<any>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -111,19 +114,25 @@ export default function Classify() {
   const handleImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
     if (!selectedFile) return;
+  const [retryCount, setRetryCount] = useState(0);
 
+  const handleImageSelect = (selectedFile: File, imageUrl: string) => {
     setError(null);
     setClassification(null);
     setFile(selectedFile);
-    
-    const imageUrl = URL.createObjectURL(selectedFile);
     setImage(imageUrl);
+    setRetryCount(0);
   };
 
   const handleClassify = async () => {
     if (!file) return;
+    
     setLoading(true);
     setError(null);
+
+    // Register retry callback
+    const operationId = `classify-${Date.now()}`;
+    errorHandler.registerRetryCallback(operationId, () => handleClassify());
 
     try {
       const formData = new FormData();
@@ -134,15 +143,40 @@ export default function Classify() {
         body: formData,
       });
 
-      if (!response.ok) throw new Error("Classification failed");
-
       const result = await response.json();
+      
+      if (!response.ok) {
+        const errorInfo = errorHandler.handleApiResponse(response, result);
+        if (errorInfo) {
+          setError(errorInfo);
+          return;
+        }
+      }
+
       setClassification(result);
+      setRetryCount(0);
     } catch (err: any) {
-      setError(err.message);
+      const errorInfo = errorHandler.handleNetworkError(err);
+      setError(errorInfo);
     } finally {
       setLoading(false);
+      errorHandler.unregisterRetryCallback(operationId);
     }
+  };
+
+  const handleRetry = async () => {
+    if (retryCount >= (error?.maxRetries || 3)) {
+      // Max retries reached, show different message
+      return;
+    }
+    
+    setRetryCount(prev => prev + 1);
+    await handleClassify();
+  };
+
+  const handleDismiss = () => {
+    setError(null);
+    setRetryCount(0);
   };
 
   return (
@@ -301,8 +335,8 @@ export default function Classify() {
     <Layout title="FlavorSnap - AI Food Classification" description="Instantly identify food with AI-powered image recognition">
       
       {/* --- HERO SECTION (Issue #24 Fix) --- */}
-      <div className="w-full flex justify-center pt-6 px-6">
-        <div className="relative w-full max-w-[500px] h-[300px] overflow-hidden rounded-2xl shadow-lg border border-gray-200 dark:border-gray-800">
+      <div className="w-full flex justify-center pt-4 sm:pt-6 px-4 sm:px-6">
+        <div className="relative w-full max-w-[500px] h-[200px] sm:h-[300px] overflow-hidden rounded-2xl shadow-lg border border-gray-200 dark:border-gray-800">
           <Image 
             src="/images/hero_img.png" 
             alt="FlavorSnap Hero"
@@ -314,55 +348,64 @@ export default function Classify() {
       </div>
       {/* ------------------------------------ */}
 
-      <div className="flex flex-col items-center justify-center p-6 text-center">
-        <h1 className="text-3xl font-bold mb-2">{t("snap_your_food")} 🍛</h1>
-        <p className="text-gray-500 mb-6">Upload a photo to see the magic</p>
+      <div className="flex flex-col items-center justify-center px-4 sm:px-6 py-4 sm:py-6 text-center">
+        <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">{t("snap_your_food")} 🍛</h1>
+        <p className="text-sm sm:text-base text-gray-500 mb-6 sm:mb-8">Upload a photo to see the magic</p>
 
         {error && (
           <ErrorMessage
-            message={error}
-            onRetry={handleClassify}
-            onDismiss={() => setError(null)}
+            message={error.userMessage}
+            onRetry={error.retryable ? handleRetry : undefined}
+            onDismiss={handleDismiss}
+            variant="inline"
           />
         )}
 
-        <input
-          type="file"
-          accept="image/*"
-          ref={fileInputRef}
-          onChange={handleImageChange}
-          className="hidden"
+        <ImageUpload
+          onImageSelect={handleImageSelect}
+          loading={loading}
+          disabled={loading}
         />
-
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-full mb-4 transition-all"
-        >
-          {t("open_camera")}
-        </button>
         
         {image && (
-          <div className="mt-6 text-center">
-            <img
-              src={image}
-              alt={t("preview_alt")}
-              className="rounded-xl shadow-md max-w-sm mx-auto mb-4 border-2 border-accent/20"
-            />
+          <div className="mt-6 sm:mt-8 w-full max-w-lg text-center">
+            <div className="relative mx-auto w-full max-w-sm sm:max-w-md">
+              <img
+                src={image}
+                alt={t("preview_alt")}
+                className="w-full h-auto rounded-xl shadow-md border-2 border-accent/20 object-cover"
+              />
+            </div>
 
             <button
               onClick={handleClassify}
               disabled={loading}
-              className="bg-accent text-white px-10 py-3 rounded-full hover:opacity-90 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all"
+              className="mt-4 sm:mt-6 bg-accent hover:bg-accent/90 text-white px-6 sm:px-8 py-3 sm:py-3.5 rounded-full text-sm sm:text-base font-medium disabled:bg-gray-400 disabled:cursor-not-allowed transition-all transform active:scale-95 touch-manipulation"
             >
-              {loading ? t('classifying') : t('classify_food')}
+              {loading ? (
+                <span className="flex items-center justify-center">
+                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 sm:h-5 sm:w-5" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  {t('classifying')}
+                </span>
+              ) : (
+                t('classify_food')
+              )}
             </button>
 
             {classification && (
-              <div className="mt-6 p-6 bg-white dark:bg-gray-800 border border-green-200 dark:border-green-900 rounded-2xl shadow-sm max-w-sm mx-auto">
-                <h3 className="font-bold text-xl text-green-600 mb-2">{classification.label}</h3>
+              <div className="mt-6 sm:mt-8 p-4 sm:p-6 bg-white dark:bg-gray-800 border border-green-200 dark:border-green-900 rounded-2xl shadow-sm max-w-sm mx-auto">
+                <h3 className="font-bold text-lg sm:text-xl text-green-600 mb-2 break-words">{classification.label || classification.food}</h3>
                 <p className="text-sm text-gray-500">
-                  Confidence: {(classification.confidence * 100).toFixed(2)}%
+                  Confidence: {((classification.confidence || 0) * 100).toFixed(2)}%
                 </p>
+                {classification.calories && (
+                  <p className="text-sm text-gray-500 mt-1">
+                    Calories: {classification.calories}
+                  </p>
+                )}
               </div>
             )}
           </div>
