@@ -10,6 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@stellar/freighter-api": "^6.0.1",
     "@tanstack/react-query": "^5.90.21",
     "i18next": "^25.8.13",
     "next": "15.3.3",
@@ -17,7 +18,8 @@
     "onnxruntime-node": "^1.24.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "soroban-client": "^1.0.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

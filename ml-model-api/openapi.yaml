@@ -1,0 +1,443 @@
+openapi: 3.0.3
+info:
+  title: FlavorSnap ML API
+  description: |
+    FlavorSnap is a food image classification API powered by deep learning.
+    Upload a picture of a local dish, and the model will tell you what it is.
+    The API uses a fine-tuned ResNet18 model to recognize and classify various food types.
+  version: 1.0.0
+  contact:
+    name: FlavorSnap Team
+    email: api@flavorsnap.com
+    url: https://github.com/DanielCharis1/flavorsnap
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Development server
+  - url: https://api.flavorsnap.com
+    description: Production server
+
+paths:
+  /predict:
+    post:
+      tags:
+        - Classification
+      summary: Classify food image
+      description: |
+        Upload an image file to get food classification results.
+        The API will return the top 3 predictions with confidence scores.
+      operationId: classifyFood
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - image
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Image file to classify (JPG, PNG, etc.)
+      responses:
+        '200':
+          description: Successful classification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationResponse'
+              examples:
+                success:
+                  summary: Successful classification
+                  value:
+                    id: "123e4567-e89b-12d3-a456-426614174000"
+                    label: "Jollof Rice"
+                    confidence: 0.92
+                    all_predictions:
+                      - label: "Jollof Rice"
+                        confidence: 0.92
+                      - label: "Fried Rice"
+                        confidence: 0.05
+                      - label: "Plain Rice"
+                        confidence: 0.03
+                    processing_time: 0.245
+                    created_at: "2024-01-15T10:30:00Z"
+                    request_id: "req_123456"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check endpoint
+      description: Check if the API and ML model are running properly
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                healthy:
+                  summary: Service is healthy
+                  value:
+                    status: "healthy"
+                    model_loaded: true
+                    classes_count: 6
+                    timestamp: 1705319400
+
+  /health/detailed:
+    get:
+      tags:
+        - Health
+      summary: Detailed health check
+      description: Comprehensive health check including system metrics
+      operationId: detailedHealthCheck
+      responses:
+        '200':
+          description: Detailed health information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealthResponse'
+
+  /metrics:
+    get:
+      tags:
+        - Monitoring
+      summary: Prometheus metrics
+      description: Returns Prometheus metrics for monitoring
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    ClassificationResponse:
+      type: object
+      required:
+        - id
+        - label
+        - confidence
+        - all_predictions
+        - processing_time
+        - created_at
+        - request_id
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for this classification
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        label:
+          type: string
+          description: Predicted food category
+          example: "Jollof Rice"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Confidence score for the top prediction
+          example: 0.92
+        all_predictions:
+          type: array
+          description: Top 3 predictions with confidence scores
+          items:
+            $ref: '#/components/schemas/Prediction'
+        processing_time:
+          type: number
+          format: float
+          description: Time taken to process the image (seconds)
+          example: 0.245
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp when classification was created
+          example: "2024-01-15T10:30:00Z"
+        request_id:
+          type: string
+          description: Unique request identifier
+          example: "req_123456"
+
+    Prediction:
+      type: object
+      required:
+        - label
+        - confidence
+      properties:
+        label:
+          type: string
+          description: Food category prediction
+          example: "Jollof Rice"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Confidence score for this prediction
+          example: 0.92
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - model_loaded
+        - classes_count
+        - timestamp
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+          description: Service health status
+          example: "healthy"
+        model_loaded:
+          type: boolean
+          description: Whether the ML model is loaded
+          example: true
+        classes_count:
+          type: integer
+          description: Number of food categories the model can classify
+          example: 6
+        timestamp:
+          type: number
+          format: float
+          description: Unix timestamp
+          example: 1705319400
+
+    DetailedHealthResponse:
+      type: object
+      required:
+        - status
+        - timestamp
+        - system
+        - gpu
+        - model
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+          description: Service health status
+        timestamp:
+          type: number
+          format: float
+          description: Unix timestamp
+        system:
+          $ref: '#/components/schemas/SystemMetrics'
+        gpu:
+          $ref: '#/components/schemas/GPUMetrics'
+        model:
+          $ref: '#/components/schemas/ModelMetrics'
+
+    SystemMetrics:
+      type: object
+      required:
+        - cpu_percent
+        - memory
+        - disk
+      properties:
+        cpu_percent:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: CPU usage percentage
+          example: 45.2
+        memory:
+          $ref: '#/components/schemas/MemoryMetrics'
+        disk:
+          $ref: '#/components/schemas/DiskMetrics'
+
+    MemoryMetrics:
+      type: object
+      required:
+        - total
+        - available
+        - percent
+        - used
+      properties:
+        total:
+          type: integer
+          format: int64
+          description: Total memory in bytes
+          example: 8589934592
+        available:
+          type: integer
+          format: int64
+          description: Available memory in bytes
+          example: 4294967296
+        percent:
+          type: number
+          format: float
+          description: Memory usage percentage
+          example: 50.0
+        used:
+          type: integer
+          format: int64
+          description: Used memory in bytes
+          example: 4294967296
+
+    DiskMetrics:
+      type: object
+      required:
+        - total
+        - used
+        - free
+        - percent
+      properties:
+        total:
+          type: integer
+          format: int64
+          description: Total disk space in bytes
+          example: 107374182400
+        used:
+          type: integer
+          format: int64
+          description: Used disk space in bytes
+          example: 53687091200
+        free:
+          type: integer
+          format: int64
+          description: Free disk space in bytes
+          example: 53687091200
+        percent:
+          type: number
+          format: float
+          description: Disk usage percentage
+          example: 50.0
+
+    GPUMetrics:
+      type: object
+      required:
+        - available
+        - device_count
+      properties:
+        available:
+          type: boolean
+          description: Whether GPU is available
+          example: true
+        device_count:
+          type: integer
+          description: Number of GPU devices
+          example: 1
+        memory_allocated:
+          type: integer
+          format: int64
+          description: GPU memory allocated in bytes
+          example: 1073741824
+        memory_cached:
+          type: integer
+          format: int64
+          description: GPU memory cached in bytes
+          example: 2147483648
+
+    ModelMetrics:
+      type: object
+      required:
+        - loaded
+        - accuracy
+      properties:
+        loaded:
+          type: boolean
+          description: Whether the model is loaded
+          example: true
+        accuracy:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Current model accuracy
+          example: 0.89
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "No image provided"
+        details:
+          type: string
+          description: Detailed error information
+          example: "The 'image' field is required in the form data"
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            no_image:
+              summary: No image provided
+              value:
+                error: "No image provided"
+                details: "The 'image' field is required in the form data"
+
+    RateLimitExceeded:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rate_limited:
+              summary: Too many requests
+              value:
+                error: "Rate limit exceeded"
+                details: "Maximum 10 requests per minute allowed"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            inference_failed:
+              summary: Model inference failed
+              value:
+                error: "Inference failed"
+                details: "Error processing image: Invalid image format"
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authentication
+
+tags:
+  - name: Classification
+    description: Food image classification operations
+  - name: Health
+    description: Health check endpoints
+  - name: Monitoring
+    description: Monitoring and metrics endpoints
