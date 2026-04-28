@@ -8,10 +8,53 @@ from datetime import datetime
 try:
     from db_config import get_connection
     from persistence import purge_old_history
-except Exception:
-    get_connection = lambda: None
-    def purge_old_history(days: int) -> int:  # type: ignore
-        return 0
+    from security_config import (
+        InputValidator, 
+        FileValidator, 
+        JSONValidator,
+        SecurityMiddleware,
+        ValidationReport,
+        SecurityScore
+    )
+    from image_optimizer import (
+        ImageProcessor,
+        ImageOptimizer,
+        ImageEnhancer,
+        ThumbnailGenerator,
+        BatchProcessor,
+        ImageMetadata
+    )
+    from test_input_validation import (
+        TestInputValidation,
+        TestImageOptimization
+    )
+    from search_handlers import (
+        SearchIndexer,
+        SearchAnalytics,
+        register_search_endpoints,
+        index_database_documents
+    )
+except ImportError as e:
+    print(f"Warning: Could not import new modules: {e}")
+    # Fallback classes
+    InputValidator = object
+    FileValidator = object
+    JSONValidator = object
+    SecurityMiddleware = object
+    ValidationReport = object
+    SecurityScore = object
+    ImageProcessor = object
+    ImageOptimizer = object
+    ImageEnhancer = object
+    ThumbnailGenerator = object
+    BatchProcessor = object
+    ImageMetadata = object
+    TestInputValidation = object
+    TestImageOptimization = object
+    SearchIndexer = object
+    SearchAnalytics = object
+    register_search_endpoints = lambda app: None
+    index_database_documents = lambda: None
 
 # Add these endpoints to the existing app.py file
 
@@ -91,7 +134,7 @@ def register_management_endpoints(app, model_registry, ab_test_manager, deployme
         )
         
         if success:
-            return jsonify({'message': f'Model {data[\"version\"]} registered successfully'}), 201
+            return jsonify({'message': f'Model {data["version"]} registered successfully'}), 201
         else:
             return jsonify({'error': 'Failed to register model'}), 500
     
@@ -262,6 +305,188 @@ def register_ab_testing_endpoints(app, ab_test_manager):
             })
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+
+def register_validation_endpoints(app):
+    """Register input validation and security endpoints"""
+    
+    if InputValidator and ImageOptimizer:
+        validator = InputValidator(ValidationLevel.MODERATE)
+        optimizer = ImageOptimizer()
+        
+        @app.route('/api/validate/text', methods=['POST'])
+        def validate_text():
+            """Validate text input"""
+            data = request.get_json()
+            if not data or 'text' not in data:
+                return jsonify({'error': 'text field is required'}), 400
+            
+            field_name = data.get('field_name', 'input')
+            max_length = data.get('max_length', 1000)
+            allow_html = data.get('allow_html', False)
+            
+            result = validator.validate_text_input(
+                data['text'], field_name, max_length, allow_html
+            )
+            
+            return jsonify({
+                'is_valid': result.is_valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'sanitized_data': result.sanitized_data,
+                'security_score': result.security_score,
+                'metadata': result.metadata
+            })
+        
+        @app.route('/api/validate/file', methods=['POST'])
+        def validate_file():
+            """Validate file upload"""
+            if 'file' not in request.files:
+                return jsonify({'error': 'file is required'}), 400
+            
+            file = request.files['file']
+            field_name = request.form.get('field_name', 'file')
+            
+            result = validator.validate_file_upload(file, field_name)
+            
+            return jsonify({
+                'is_valid': result.is_valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'security_score': result.security_score,
+                'metadata': result.metadata
+            })
+        
+        @app.route('/api/validate/json', methods=['POST'])
+        def validate_json():
+            """Validate JSON input"""
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'JSON data is required'}), 400
+            
+            schema = data.get('schema')
+            json_data = data.get('data', data)
+            
+            result = validator.validate_json_input(json_data, schema)
+            
+            return jsonify({
+                'is_valid': result.is_valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'sanitized_data': result.sanitized_data,
+                'security_score': result.security_score,
+                'metadata': result.metadata
+            })
+        
+        @app.route('/api/optimize/image', methods=['POST'])
+        def optimize_image():
+            """Optimize uploaded image"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            output_format = request.form.get('format', 'JPEG')
+            preset = request.form.get('preset', 'web')
+            
+            # Read image data
+            image_data = file.read()
+            
+            result = optimizer.optimize_image(
+                image_data, output_format, preset
+            )
+            
+            if result.success:
+                response = jsonify({
+                    'success': True,
+                    'original_size': result.original_size,
+                    'optimized_size': result.optimized_size,
+                    'compression_ratio': result.compression_ratio,
+                    'format': result.format,
+                    'dimensions': result.dimensions,
+                    'processing_time': result.processing_time,
+                    'errors': result.errors,
+                    'warnings': result.warnings,
+                    'metadata': result.metadata
+                })
+                
+                # Add optimized image as base64 if requested
+                if request.form.get('include_data') == 'true':
+                    import base64
+                    optimized_data = result.metadata.get('optimized_data')
+                    if optimized_data:
+                        response.json['optimized_data'] = base64.b64encode(optimized_data).decode()
+                
+                return response
+            else:
+                return jsonify({
+                    'success': False,
+                    'errors': result.errors,
+                    'warnings': result.warnings,
+                    'metadata': result.metadata
+                }), 400
+        
+        @app.route('/api/image/info', methods=['POST'])
+        def get_image_info():
+            """Get image information"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            image_data = file.read()
+            
+            info = optimizer.get_image_info(image_data)
+            
+            return jsonify(info)
+        
+        @app.route('/api/image/thumbnail', methods=['POST'])
+        def create_thumbnail():
+            """Create thumbnail from image"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            image_data = file.read()
+            
+            width = int(request.form.get('width', 150))
+            height = int(request.form.get('height', 150))
+            crop_to_fit = request.form.get('crop_to_fit', 'true').lower() == 'true'
+            
+            try:
+                thumbnail_data = optimizer.create_thumbnail(
+                    image_data, (width, height), crop_to_fit
+                )
+                
+                import base64
+                return jsonify({
+                    'success': True,
+                    'thumbnail_data': base64.b64encode(thumbnail_data).decode(),
+                    'size': len(thumbnail_data)
+                })
+            
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+        
+        @app.route('/api/image/suggestions', methods=['POST'])
+        def get_optimization_suggestions():
+            """Get optimization suggestions for image"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            image_data = file.read()
+            
+            suggestions = optimizer.get_optimization_suggestions(image_data)
+            
+            return jsonify(suggestions)
+        
+        @app.route('/api/security/report', methods=['GET'])
+        def get_security_report():
+            """Get security validation report summary"""
+            from security_config import create_security_report_summary
+            summary = create_security_report_summary(app)
+            return jsonify(summary)
 
 def register_utility_endpoints(app):
     """Register utility endpoints"""
@@ -455,8 +680,18 @@ def register_utility_endpoints(app):
             return jsonify({'error': str(e)}), 500
 
 # Function to register all endpoints
-def register_all_endpoints(app, model_registry, ab_test_manager, deployment_manager, model_validator):
-    """Register all management endpoints"""
-    register_management_endpoints(app, model_registry, ab_test_manager, deployment_manager, model_validator)
-    register_ab_testing_endpoints(app, ab_test_manager)
+def register_all_endpoints(app, model_registry=None, ab_test_manager=None, deployment_manager=None, model_validator=None):
+    """Register all endpoints"""
+    if model_registry and deployment_manager and model_validator:
+        register_management_endpoints(app, model_registry, ab_test_manager, deployment_manager, model_validator)
+    if ab_test_manager:
+        register_ab_testing_endpoints(app, ab_test_manager)
     register_utility_endpoints(app)
+    register_validation_endpoints(app)
+    register_search_endpoints(app)
+    
+    # Initialize search index on startup
+    try:
+        index_database_documents()
+    except Exception as e:
+        print(f"Warning: Failed to initialize search index: {e}")
