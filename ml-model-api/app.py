@@ -1,6 +1,4 @@
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
+from flask import Flask, request, jsonify, g
 from PIL import Image
 import io
 import os
@@ -26,6 +24,8 @@ from batch_processor import MLBatchProcessor, TaskPriority
 from cache_manager import CacheManager, DistributedCacheManager
 from monitoring import QueueMonitor, console_alert_handler, log_alert_handler
 from persistence import QueuePersistence, create_persistence_backend
+from security_config import init_rate_limiter, add_rate_limit_headers
+from api_endpoints import register_api_endpoints
 
 # Initialize configuration
 config = get_config()
@@ -45,6 +45,15 @@ try:
     logger.info("Database initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize database: {e}")
+
+# Initialize rate limiting system
+try:
+    rate_limit_config = get_config_value('rate_limiting', {})
+    rate_limiter = init_rate_limiter(rate_limit_config)
+    logger.info("Rate limiting system initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize rate limiting: {e}")
+    rate_limiter = None
 
 # Initialize queue management components
 try:
@@ -105,25 +114,80 @@ def on_config_change(new_config, old_config):
 # Register configuration change callback
 config.add_change_callback(on_config_change)
 
+# Register API endpoints with rate limiting
+register_api_endpoints(app)
+
+# Add rate limit headers to all responses
+@app.after_request
+def after_request(response):
+    """Add rate limit headers to all responses"""
+    return add_rate_limit_headers(response)
+
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
+    """Enhanced health check endpoint for deployment monitoring"""
     try:
         # Check database connection
         db_status = db_config.test_connection()
         
-        return jsonify({
-            'status': 'healthy',
-            'timestamp': config.get('monitoring.health_check_interval'),
-            'database': 'connected' if db_status else 'disconnected',
+        # Check cache status
+        cache_status = 'connected' if cache_manager else 'disconnected'
+        
+        # Check queue status
+        queue_status = 'active' if batch_processor else 'inactive'
+        
+        # Check disk space
+        import shutil
+        disk_usage = shutil.disk_usage('/')
+        disk_free_percent = (disk_usage.free / disk_usage.total) * 100
+        
+        # Check memory usage
+        import psutil
+        memory = psutil.virtual_memory()
+        memory_usage_percent = memory.percent
+        
+        # Overall health determination
+        overall_healthy = (
+            db_status and 
+            disk_free_percent > 10 and 
+            memory_usage_percent < 90
+        )
+        
+        health_data = {
+            'status': 'healthy' if overall_healthy else 'unhealthy',
+            'timestamp': datetime.now().isoformat(),
+            'checks': {
+                'database': 'connected' if db_status else 'disconnected',
+                'cache': cache_status,
+                'queue': queue_status,
+                'disk_space': {
+                    'free_percent': round(disk_free_percent, 2),
+                    'free_gb': round(disk_usage.free / (1024**3), 2),
+                    'total_gb': round(disk_usage.total / (1024**3), 2)
+                },
+                'memory': {
+                    'usage_percent': memory_usage_percent,
+                    'available_gb': round(memory.available / (1024**3), 2),
+                    'total_gb': round(memory.total / (1024**3), 2)
+                }
+            },
             'version': get_config_value('app.version', '1.0.0'),
-            'environment': config.environment
-        }), 200
+            'environment': config.environment,
+            'deployment_color': os.getenv('DEPLOYMENT_COLOR', 'unknown'),
+            'deployment_id': os.getenv('DEPLOYMENT_ID', 'unknown')
+        }
+        
+        status_code = 200 if overall_healthy else 503
+        return jsonify(health_data), status_code
+        
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return jsonify({
             'status': 'unhealthy',
-            'error': str(e)
+            'timestamp': datetime.now().isoformat(),
+            'error': str(e),
+            'version': get_config_value('app.version', '1.0.0'),
+            'environment': config.environment
         }), 500
 
 @app.route('/config', methods=['GET'])
@@ -158,156 +222,16 @@ def reload_config():
         logger.error(f"Failed to reload config: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Note: The /predict endpoint is now handled by api_endpoints.py with rate limiting
+# This route is kept for backward compatibility but redirects to the new endpoint
 @app.route('/predict', methods=['POST'])
-@tiered_rate_limit('predict')
-@require_api_key
-def predict():
-    """Food classification prediction endpoint"""
-    """Food classification prediction endpoint with queue support"""
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image uploaded'}), 400
-
-    file = request.files['image']
-    
-    # Validate file extension
-    allowed_extensions = get_config_value('file_storage.allowed_extensions', ['jpg', 'jpeg', 'png', 'gif', 'bmp'])
-    if file.filename and '.' in file.filename:
-        file_ext = file.filename.rsplit('.', 1)[1].lower()
-        if file_ext not in allowed_extensions:
-            return jsonify({'error': f'File extension not allowed. Allowed: {allowed_extensions}'}), 400
-
-    try:
-        # Log prediction request
-        logger.info(f"Processing image: {file.filename}")
-        
-        # Placeholder for preprocessing & prediction
-        image = Image.open(file.stream)
-        
-        # TODO: Implement actual model prediction
-        # model_path = get_config_value('ml_model.model_path')
-        # classes_file = get_config_value('ml_model.classes_file')
-        # input_size = get_config_value('ml_model.input_size', [224, 224])
-        
-        predicted_label = "Moi Moi"  # Dummy output for now
-        confidence = 0.95  # Dummy confidence
-        
-        logger.info(f"Prediction completed: {predicted_label} (confidence: {confidence})")
-        
-        return jsonify({
-            'label': predicted_label,
-            'confidence': confidence,
-            'model_version': get_config_value('app.version', '1.0.0')
-        })
-        
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-    
-    # Validate file extension
-    allowed_extensions = get_config_value('file_storage.allowed_extensions', ['jpg', 'jpeg', 'png', 'gif', 'bmp'])
-    if file.filename and '.' in file.filename:
-        file_ext = file.filename.rsplit('.', 1)[1].lower()
-        if file_ext not in allowed_extensions:
-            return jsonify({'error': f'File extension not allowed. Allowed: {allowed_extensions}'}), 400
-
-    try:
-        # Generate image hash for caching
-        image_bytes = file.stream.read()
-        file.stream.seek(0)  # Reset stream position
-        image_hash = hashlib.md5(image_bytes).hexdigest()
-        
-        # Check cache first
-        if cache_manager:
-            cached_result = cache_manager.get_cached_prediction(image_hash)
-            if cached_result:
-                logger.info(f"Cache hit for image: {file.filename}")
-                return jsonify({
-                    'label': cached_result['label'],
-                    'confidence': cached_result['confidence'],
-                    'cached': True,
-                    'model_version': get_config_value('app.version', '1.0.0')
-                })
-        
-        # Check if we should use queue processing
-        use_queue = request.form.get('use_queue', 'false').lower() == 'true'
-        priority_str = request.form.get('priority', 'normal')
-        
-        if use_queue and batch_processor:
-            # Submit to queue
-            priority_map = {
-                'low': TaskPriority.LOW,
-                'normal': TaskPriority.NORMAL,
-                'high': TaskPriority.HIGH,
-                'critical': TaskPriority.CRITICAL
-            }
-            priority = priority_map.get(priority_str.lower(), TaskPriority.NORMAL)
-            
-            task_payload = {
-                'image_data': image_bytes,
-                'filename': file.filename,
-                'metadata': {
-                    'content_type': file.content_type,
-                    'file_size': len(image_bytes)
-                }
-            }
-            
-            task_id = batch_processor.submit_task(
-                payload=task_payload,
-                priority=priority,
-                metadata={'filename': file.filename}
-            )
-            
-            # Save to persistence
-            if queue_persistence:
-                from persistence import PersistentTask, TaskStatus
-                persistent_task = PersistentTask(
-                    id=task_id,
-                    priority=priority.value,
-                    status=TaskStatus.PENDING,
-                    payload=task_payload,
-                    created_at=datetime.now(),
-                    metadata={'filename': file.filename}
-                )
-                queue_persistence.save_task(persistent_task)
-            
-            logger.info(f"Task {task_id} submitted to queue with priority {priority.name}")
-            
-            return jsonify({
-                'task_id': task_id,
-                'status': 'queued',
-                'priority': priority.name,
-                'message': 'Task submitted to queue for processing'
-            }), 202
-        
-        # Direct processing (original behavior)
-        logger.info(f"Processing image directly: {file.filename}")
-        
-        image = Image.open(file.stream)
-        
-        # TODO: Implement actual model prediction
-        # model_path = get_config_value('ml_model.model_path')
-        # classes_file = get_config_value('ml_model.classes_file')
-        # input_size = get_config_value('ml_model.input_size', [224, 224])
-        
-        predicted_label = "Moi Moi"  # Dummy output for now
-        confidence = 0.95  # Dummy confidence
-        
-        result = {
-            'label': predicted_label,
-            'confidence': confidence,
-            'model_version': get_config_value('app.version', '1.0.0')
-        }
-        
-        # Cache result
-        if cache_manager:
-            cache_manager.cache_prediction_result(image_hash, result)
-        
-        logger.info(f"Prediction completed: {predicted_label} (confidence: {confidence})")
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        return jsonify({'error': str(e)}), 500
+def predict_legacy():
+    """Legacy prediction endpoint - redirects to new rate-limited endpoint"""
+    return jsonify({
+        'message': 'This endpoint is deprecated. Please use /api/v1/predict instead.',
+        'new_endpoint': '/api/v1/predict',
+        'documentation': 'See API documentation for rate limiting details'
+    }), 301
 
 # Queue management endpoints
 @app.route('/queue/status', methods=['GET'])
@@ -441,6 +365,179 @@ def export_metrics():
         logger.error(f"Failed to export metrics: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Deployment monitoring endpoints
+@app.route('/deployment/status', methods=['GET'])
+def deployment_status():
+    """Get deployment status information"""
+    try:
+        import psutil
+        
+        # Get system metrics
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        # Get application metrics
+        queue_stats = batch_processor.get_queue_stats() if batch_processor else {}
+        cache_stats = cache_manager.get_comprehensive_stats() if cache_manager else {}
+        
+        deployment_info = {
+            'deployment': {
+                'id': os.getenv('DEPLOYMENT_ID', 'unknown'),
+                'color': os.getenv('DEPLOYMENT_COLOR', 'unknown'),
+                'environment': config.environment,
+                'version': get_config_value('app.version', '1.0.0'),
+                'start_time': datetime.now().isoformat(),
+                'uptime_seconds': time.time() - psutil.boot_time()
+            },
+            'system': {
+                'cpu_percent': cpu_percent,
+                'memory': {
+                    'total_gb': round(memory.total / (1024**3), 2),
+                    'available_gb': round(memory.available / (1024**3), 2),
+                    'usage_percent': memory.percent,
+                    'used_gb': round(memory.used / (1024**3), 2)
+                },
+                'disk': {
+                    'total_gb': round(disk.total / (1024**3), 2),
+                    'free_gb': round(disk.free / (1024**3), 2),
+                    'usage_percent': round((disk.used / disk.total) * 100, 2),
+                    'used_gb': round(disk.used / (1024**3), 2)
+                }
+            },
+            'application': {
+                'queue_stats': queue_stats,
+                'cache_stats': cache_stats,
+                'database_connected': db_config.test_connection() if db_config else False
+            }
+        }
+        
+        return jsonify(deployment_info), 200
+        
+    except Exception as e:
+        logger.error(f"Failed to get deployment status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/deployment/metrics', methods=['GET'])
+def deployment_metrics():
+    """Get detailed deployment metrics for monitoring"""
+    try:
+        import psutil
+        
+        # Process-specific metrics
+        process = psutil.Process()
+        
+        metrics = {
+            'flask_http_request_duration_seconds': [
+                {
+                    'quantile': '0.5',
+                    'value': 0.1  # Placeholder - would need actual timing
+                },
+                {
+                    'quantile': '0.95',
+                    'value': 0.3  # Placeholder - would need actual timing
+                },
+                {
+                    'quantile': '0.99',
+                    'value': 0.5  # Placeholder - would need actual timing
+                }
+            ],
+            'flask_http_request_total': [
+                {
+                    'method': 'GET',
+                    'endpoint': '/health',
+                    'status': '200',
+                    'value': 100  # Placeholder - would need actual counter
+                }
+            ],
+            'flask_http_request_exceptions_total': [
+                {
+                    'method': 'POST',
+                    'endpoint': '/predict',
+                    'status': '500',
+                    'value': 5  # Placeholder - would need actual counter
+                }
+            ],
+            'flask_database_connections': 1 if db_config and db_config.test_connection() else 0,
+            'flask_database_query_duration_seconds': [
+                {
+                    'quantile': '0.95',
+                    'value': 0.05  # Placeholder
+                }
+            ],
+            'cache_hits_total': cache_stats.get('hits', 0) if cache_manager else 0,
+            'cache_misses_total': cache_stats.get('misses', 0) if cache_manager else 0,
+            'queue_pending_tasks': queue_stats.get('pending_tasks', 0) if batch_processor else 0,
+            'queue_running_tasks': queue_stats.get('running_tasks', 0) if batch_processor else 0,
+            'queue_completed_tasks': queue_stats.get('completed_tasks', 0) if batch_processor else 0,
+            'queue_failed_tasks': queue_stats.get('failed_tasks', 0) if batch_processor else 0,
+            'process_resident_memory_bytes': process.memory_info().rss,
+            'process_cpu_seconds_total': process.cpu_times().user + process.cpu_times().system,
+            'process_num_threads': process.num_threads(),
+            'up': 1,  # Application is up
+            'flask_health_check_status': 1 if db_config and db_config.test_connection() else 0
+        }
+        
+        return jsonify(metrics), 200
+        
+    except Exception as e:
+        logger.error(f"Failed to get deployment metrics: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/deployment/ready', methods=['GET'])
+def readiness_check():
+    """Readiness check for Kubernetes"""
+    try:
+        # Check if application is ready to serve traffic
+        db_ready = db_config.test_connection() if db_config else False
+        cache_ready = cache_manager is not None
+        queue_ready = batch_processor is not None
+        
+        ready = db_ready and cache_ready and queue_ready
+        
+        if ready:
+            return jsonify({
+                'status': 'ready',
+                'checks': {
+                    'database': db_ready,
+                    'cache': cache_ready,
+                    'queue': queue_ready
+                }
+            }), 200
+        else:
+            return jsonify({
+                'status': 'not_ready',
+                'checks': {
+                    'database': db_ready,
+                    'cache': cache_ready,
+                    'queue': queue_ready
+                }
+            }), 503
+            
+    except Exception as e:
+        logger.error(f"Readiness check failed: {e}")
+        return jsonify({
+            'status': 'not_ready',
+            'error': str(e)
+        }), 503
+
+@app.route('/deployment/live', methods=['GET'])
+def liveness_check():
+    """Liveness check for Kubernetes"""
+    try:
+        # Simple liveness check - if we can respond, we're alive
+        return jsonify({
+            'status': 'alive',
+            'timestamp': datetime.now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Liveness check failed: {e}")
+        return jsonify({
+            'status': 'dead',
+            'error': str(e)
+        }), 500
+
 @app.errorhandler(413)
 def too_large(e):
     """Handle file too large error"""
@@ -456,6 +553,47 @@ def internal_error(e):
     """Handle internal server error"""
     logger.error(f"Internal server error: {e}")
     return jsonify({'error': 'Internal server error'}), 500
+
+@app.teardown_appcontext
+def teardown_appcontext(exception=None):
+    """Clean up resources when app context ends"""
+    pass
+
+# Register shutdown handlers
+import atexit
+
+def cleanup_resources():
+    """Clean up all resources on shutdown"""
+    logger.info("Cleaning up application resources...")
+    
+    # Shutdown rate limiter
+    if rate_limiter:
+        try:
+            rate_limiter.shutdown()
+            logger.info("Rate limiter shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down rate limiter: {e}")
+    
+    # Shutdown queue monitor
+    if queue_monitor:
+        try:
+            queue_monitor.stop_monitoring()
+            logger.info("Queue monitor shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down queue monitor: {e}")
+    
+    # Shutdown cache manager
+    if cache_manager:
+        try:
+            cache_manager.shutdown()
+            logger.info("Cache manager shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down cache manager: {e}")
+    
+    logger.info("Application cleanup complete")
+
+# Register cleanup function
+atexit.register(cleanup_resources)
 
 if __name__ == '__main__':
     try:

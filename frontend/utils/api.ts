@@ -1,223 +1,136 @@
-import { ApiErrorResponse } from "../types";
+import axios from 'axios';
 
-// Input sanitization utilities for frontend
-class InputSanitizer {
-  /**
-   * Sanitize string input to prevent XSS attacks
-   */
-  static sanitizeString(text: string, maxLength: number = 1000): string {
-    if (!text || typeof text !== 'string') return '';
+// Create axios instance with default configuration
+const api = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api',
+  timeout: 30000, // 30 seconds timeout
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
-    // Remove null bytes and control characters
-    text = text.replace(/\x00/g, '').replace(/\r/g, '').replace(/\n/g, ' ');
-
-    // Remove HTML tags (basic XSS protection)
-    text = text.replace(/<[^>]*>/g, '');
-
-    // Remove dangerous protocols
-    text = text.replace(/(javascript|vbscript|data|file):/gi, '');
-
-    // Remove potential script injection patterns
-    text = text.replace(/<script[^>]*>.*?<\/script>/gi, '');
-    text = text.replace(/on\w+\s*=/gi, '');
-
-    // Remove SQL injection patterns
-    text = text.replace(/\b(union|select|insert|update|delete|drop|create|alter|exec|execute)\b/gi, '');
-
-    // Remove command injection patterns
-    text = text.replace(/[;&|`$()<>]/g, '');
-
-    return text.substring(0, maxLength).trim();
-  }
-
-  /**
-   * Sanitize filename for file uploads
-   */
-  static sanitizeFilename(filename: string): string {
-    if (!filename || typeof filename !== 'string') return '';
-
-    // Remove path traversal attempts
-    filename = filename.replace(/.*[/\\]/, '');
-
-    // Remove dangerous characters
-    filename = filename.replace(/[<>:"/\\|?*\x00-\x1f]/g, '');
-
-    // Limit length
-    return filename.substring(0, 255);
-  }
-
-  /**
-   * Sanitize email input
-   */
-  static sanitizeEmail(email: string): string {
-    if (!email || typeof email !== 'string') return '';
-
-    // Basic email validation and sanitization
-    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    if (!emailRegex.test(email)) return '';
-
-    return email.toLowerCase().substring(0, 254);
-  }
-
-  /**
-   * Sanitize URL input
-   */
-  static sanitizeUrl(url: string): string {
-    if (!url || typeof url !== 'string') return '';
-
-    // Remove dangerous protocols
-    url = url.replace(/(javascript|vbscript|data|file):/gi, '');
-
-    // Basic URL validation
-    if (!/^https?:\/\//.test(url)) return '';
-
-    return url.substring(0, 2000);
-  }
-
-  /**
-   * Sanitize numeric input within bounds
-   */
-  static sanitizeNumber(value: any, min: number = -1000000, max: number = 1000000): number | null {
-    const num = typeof value === 'string' ? parseFloat(value) : Number(value);
-    if (isNaN(num) || !isFinite(num)) return null;
-    return Math.max(min, Math.min(max, num));
-  }
-
-  /**
-   * Sanitize boolean input
-   */
-  static sanitizeBoolean(value: any): boolean {
-    return Boolean(value);
-  }
-
-  /**
-   * Sanitize object/array data recursively
-   */
-  static sanitizeObject(data: any, maxDepth: number = 5, currentDepth: number = 0): any {
-    if (currentDepth >= maxDepth) return null;
-
-    if (typeof data === 'string') {
-      return this.sanitizeString(data);
+// Request interceptor to add auth token if available
+api.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('authToken');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
     }
-
-    if (typeof data === 'number') {
-      return this.sanitizeNumber(data);
-    }
-
-    if (typeof data === 'boolean') {
-      return data;
-    }
-
-    if (Array.isArray(data)) {
-      return data.slice(0, 100).map(item => this.sanitizeObject(item, maxDepth, currentDepth + 1));
-    }
-
-    if (data && typeof data === 'object') {
-      const sanitized: any = {};
-      for (const [key, value] of Object.entries(data)) {
-        const sanitizedKey = this.sanitizeString(key, 100);
-        if (sanitizedKey) {
-          sanitized[sanitizedKey] = this.sanitizeObject(value, maxDepth, currentDepth + 1);
-        }
-      }
-      return sanitized;
-    }
-
-    return null; // Skip unsupported types
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
   }
+);
 
-  /**
-   * Validate file before upload
-   */
-  static validateFile(file: File): { valid: boolean; error?: string } {
-    // Check file size (10MB limit)
-    const maxSize = 10 * 1024 * 1024;
-    if (file.size > maxSize) {
-      return { valid: false, error: `File size exceeds ${maxSize / (1024 * 1024)}MB limit` };
+// Response interceptor for error handling
+api.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  (error) => {
+    if (error.response?.status === 401) {
+      // Token expired or invalid, clear local storage and redirect to login
+      localStorage.removeItem('authToken');
+      window.location.href = '/login';
     }
-
-    // Check file type
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!allowedTypes.includes(file.type)) {
-      return { valid: false, error: 'Unsupported file type. Allowed: JPG, PNG, WebP' };
-    }
-
-    // Sanitize filename
-    const sanitizedName = this.sanitizeFilename(file.name);
-    if (!sanitizedName) {
-      return { valid: false, error: 'Invalid filename' };
-    }
-
-    return { valid: true };
+    return Promise.reject(error);
   }
-}
+);
 
-interface ApiResponse<T = any> {
-  data?: T;
-  error?: string;
-  status: number;
-  progress?: number; // Progress percentage (0-100)
-  cached?: boolean; // Whether response came from cache
-}
+// API endpoints
+export const predictionAPI = {
+  // Classify food image
+  classifyImage: (formData: FormData) => {
+    return api.post('/predict', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
 
-interface ApiOptions extends RequestInit {
-  retries?: number;
-  retryDelay?: number;
-  skipCache?: boolean; // Skip cache for this request
-}
+  // Get food classes
+  getFoodClasses: () => {
+    return api.get('/predict/classes');
+  },
 
-interface CacheEntry<T = any> {
-  data: T;
-  timestamp: number;
-  ttl: number;
-}
+  // Get classification history
+  getClassificationHistory: (userId: string, page?: number, limit?: number) => {
+    const params = new URLSearchParams();
+    if (page) params.append('page', page.toString());
+    if (limit) params.append('limit', limit.toString());
+    params.append('user_id', userId);
+    
+    return api.get(`/predict/history?${params}`);
+  },
 
-class ApiError extends Error {
-  constructor(
-    message: string,
-    public status: number,
-    public data?: ApiErrorResponse,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
+  // Submit feedback on classification
+  submitFeedback: (classificationId: string, isCorrect: boolean, correctLabel?: string) => {
+    return api.post('/predict/feedback', {
+      classification_id: classificationId,
+      is_correct: isCorrect,
+      correct_label: correctLabel,
+    });
+  },
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Cache configuration
-const CACHE_CONFIG = {
-  defaultTTL: 60 * 60 * 1000, // 1 hour in milliseconds
-  maxEntries: 100, // Maximum cache entries
-  storageKey: 'flavorsnap_api_cache',
+  // Get prediction statistics
+  getPredictionStats: (timeframe?: string) => {
+    const params = timeframe ? `?timeframe=${timeframe}` : '';
+    return api.get(`/predict/stats${params}`);
+  },
 };
 
-// In-memory cache for faster access
-let memoryCache: Map<string, CacheEntry> = new Map();
+export const userAPI = {
+  // Register new user
+  register: (userData: {
+    email: string;
+    username: string;
+    password: string;
+    first_name?: string;
+    last_name?: string;
+  }) => {
+    return api.post('/users/register', userData);
+  },
 
-// Load cache from localStorage on module load
-const loadCacheFromStorage = () => {
-  try {
-    const stored = localStorage.getItem(CACHE_CONFIG.storageKey);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      memoryCache = new Map(Object.entries(parsed));
-      // Clean expired entries
-      cleanExpiredCache();
-    }
-  } catch (error) {
-    console.warn('Failed to load cache from localStorage:', error);
-  }
+  // Login user
+  login: (credentials: { email: string; password: string }) => {
+    return api.post('/users/login', credentials);
+  },
+
+  // Get user profile
+  getProfile: () => {
+    return api.get('/users/profile');
+  },
+
+  // Update user profile
+  updateProfile: (profileData: {
+    first_name?: string;
+    last_name?: string;
+    avatar_url?: string;
+  }) => {
+    return api.put('/users/profile', profileData);
+  },
 };
 
-// Save cache to localStorage
-const saveCacheToStorage = () => {
-  try {
-    const cacheObject = Object.fromEntries(memoryCache);
-    localStorage.setItem(CACHE_CONFIG.storageKey, JSON.stringify(cacheObject));
-  } catch (error) {
-    console.warn('Failed to save cache to localStorage:', error);
-  }
+export const foodAPI = {
+  // Get all food categories
+  getFoodCategories: () => {
+    return api.get('/foods');
+  },
+
+  // Get specific food category
+  getFoodCategory: (id: string) => {
+    return api.get(`/foods/${id}`);
+  },
+
+  // Get classifications for food category
+  getFoodClassifications: (id: string, page?: number, limit?: number) => {
+    const params = new URLSearchParams();
+    if (page) params.append('page', page.toString());
+    if (limit) params.append('limit', limit.toString());
+    
+    return api.get(`/foods/${id}/classifications?${params}`);
+  },
 };
 
 // Clean expired cache entries
@@ -660,6 +573,4 @@ export const api = {
   }
 };
 
-export { ApiError };
-export type { ApiResponse };
-export { InputSanitizer };
+export default api;

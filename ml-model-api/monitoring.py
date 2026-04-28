@@ -1216,6 +1216,28 @@ class QueueMonitor:
                 condition="avg_processing_time >",
                 threshold=30000,  # 30 seconds in ms
                 message="Average processing time is too high"
+            ),
+            # Rate limiting alerts
+            Alert(
+                name="high_rate_limit_violations",
+                level=AlertLevel.WARNING,
+                condition="rate_limit_violations >",
+                threshold=100,
+                message="High rate limit violation rate detected"
+            ),
+            Alert(
+                name="many_blocked_users",
+                level=AlertLevel.ERROR,
+                condition="blocked_users >",
+                threshold=50,
+                message="Too many users are blocked"
+            ),
+            Alert(
+                name="rate_limit_bypass_usage",
+                level=AlertLevel.INFO,
+                condition="bypass_usage >",
+                threshold=10,
+                message="High rate limit bypass usage detected"
             )
         ]
         
@@ -1269,6 +1291,37 @@ class QueueMonitor:
                 self.metrics_collector.set_gauge("throughput", metrics.throughput, labels)
                 self.metrics_collector.set_gauge("avg_wait_time", metrics.average_wait_time, labels)
                 self.metrics_collector.set_gauge("avg_processing_time", metrics.average_processing_time, labels)
+            
+            # Collect rate limiting metrics if available
+            try:
+                from security_config import get_rate_limiter
+                rate_limiter = get_rate_limiter()
+                rate_limit_stats = rate_limiter.get_analytics(1)  # Last hour
+                
+                # Rate limiting metrics
+                rate_limit_analytics = rate_limit_stats.get('rate_limit_analytics', {})
+                current_stats = rate_limit_analytics.get('current_stats', {})
+                
+                self.metrics_collector.set_gauge("rate_limit_total_requests", current_stats.get('total_requests', 0))
+                self.metrics_collector.set_gauge("rate_limit_blocked_requests", current_stats.get('blocked_requests', 0))
+                self.metrics_collector.set_gauge("rate_limit_active_clients", rate_limit_stats.get('active_clients', 0))
+                self.metrics_collector.set_gauge("rate_limit_blocked_clients", rate_limit_stats.get('blocked_clients', 0))
+                
+                # Calculate violation rate
+                total_requests = current_stats.get('total_requests', 0)
+                blocked_requests = current_stats.get('blocked_requests', 0)
+                violation_rate = (blocked_requests / total_requests * 100) if total_requests > 0 else 0
+                self.metrics_collector.set_gauge("rate_limit_violation_rate", violation_rate)
+                
+                # Dynamic adjustment metrics
+                dynamic_adjustments = rate_limit_stats.get('dynamic_adjustments', {})
+                for user_type, adjustment_stats in dynamic_adjustments.items():
+                    labels = {"user_type": user_type}
+                    self.metrics_collector.set_gauge("rate_limit_load_factor", 
+                                                    adjustment_stats.get('current_load_factor', 1.0), labels)
+                
+            except Exception as e:
+                logger.debug(f"Could not collect rate limiting metrics: {e}")
     
     def update_queue_metrics(self, queue_name: str, **kwargs):
         """Update metrics for a specific queue"""

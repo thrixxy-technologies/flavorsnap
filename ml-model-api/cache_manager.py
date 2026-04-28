@@ -277,7 +277,15 @@ class CacheManager:
     def cache_prediction_result(self, image_hash: str, result: Dict[str, Any], ttl_seconds: int = 3600):
         """Cache ML prediction result"""
         key = f"prediction:{image_hash}"
-        self.results_cache.set(key, result, ttl_seconds, {'type': 'prediction'})
+        
+        # Add rate limiting metadata
+        metadata = {
+            'type': 'prediction',
+            'cached_at': datetime.now().isoformat(),
+            'cache_version': '1.0'
+        }
+        
+        self.results_cache.set(key, result, ttl_seconds, metadata)
     
     def get_cached_prediction(self, image_hash: str) -> Optional[Dict[str, Any]]:
         """Get cached prediction result"""
@@ -287,7 +295,15 @@ class CacheManager:
     def cache_queue_stats(self, queue_id: str, stats: Dict[str, Any], ttl_seconds: int = 60):
         """Cache queue statistics"""
         key = f"queue_stats:{queue_id}"
-        self.queue_cache.set(key, stats, ttl_seconds, {'type': 'queue_stats'})
+        
+        # Add rate limiting metadata
+        metadata = {
+            'type': 'queue_stats',
+            'cached_at': datetime.now().isoformat(),
+            'cache_version': '1.0'
+        }
+        
+        self.queue_cache.set(key, stats, ttl_seconds, metadata)
     
     def get_cached_queue_stats(self, queue_id: str) -> Optional[Dict[str, Any]]:
         """Get cached queue statistics"""
@@ -297,7 +313,16 @@ class CacheManager:
     def cache_batch_result(self, batch_id: str, results: List[Dict[str, Any]], ttl_seconds: int = 7200):
         """Cache batch processing results"""
         key = f"batch:{batch_id}"
-        self.general_cache.set(key, results, ttl_seconds, {'type': 'batch_result'})
+        
+        # Add rate limiting metadata
+        metadata = {
+            'type': 'batch_result',
+            'cached_at': datetime.now().isoformat(),
+            'cache_version': '1.0',
+            'batch_size': len(results)
+        }
+        
+        self.general_cache.set(key, results, ttl_seconds, metadata)
     
     def get_cached_batch_result(self, batch_id: str) -> Optional[List[Dict[str, Any]]]:
         """Get cached batch processing results"""
@@ -338,6 +363,41 @@ class CacheManager:
                             if key.startswith("prediction:")]
             for key in keys_to_delete:
                 self.results_cache.delete(key)
+    
+    def cache_rate_limit_state(self, user_id: str, rate_limit_state: Dict[str, Any], ttl_seconds: int = 300):
+        """Cache rate limit state for a user"""
+        key = f"rate_limit_state:{user_id}"
+        
+        metadata = {
+            'type': 'rate_limit_state',
+            'cached_at': datetime.now().isoformat(),
+            'cache_version': '1.0',
+            'user_type': rate_limit_state.get('user_type', 'unknown')
+        }
+        
+        self.general_cache.set(key, rate_limit_state, ttl_seconds, metadata)
+    
+    def get_cached_rate_limit_state(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get cached rate limit state for a user"""
+        key = f"rate_limit_state:{user_id}"
+        return self.general_cache.get(key)
+    
+    def cache_rate_limit_analytics(self, analytics_key: str, analytics_data: Dict[str, Any], ttl_seconds: int = 600):
+        """Cache rate limit analytics data"""
+        key = f"rate_limit_analytics:{analytics_key}"
+        
+        metadata = {
+            'type': 'rate_limit_analytics',
+            'cached_at': datetime.now().isoformat(),
+            'cache_version': '1.0'
+        }
+        
+        self.general_cache.set(key, analytics_data, ttl_seconds, metadata)
+    
+    def get_cached_rate_limit_analytics(self, analytics_key: str) -> Optional[Dict[str, Any]]:
+        """Get cached rate limit analytics data"""
+        key = f"rate_limit_analytics:{analytics_key}"
+        return self.general_cache.get(key)
     
     def get_comprehensive_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics"""

@@ -1,0 +1,233 @@
+# Rate Limiting Configuration for FlavorSnap ML API
+# This file demonstrates the advanced rate limiting configuration options
+
+rate_limiting:
+  # Global rate limiting settings
+  enabled: true
+  default_strategy: "token_bucket"
+  cleanup_interval: 300  # seconds (5 minutes)
+  max_events: 100000  # Maximum analytics events to keep in memory
+  
+  # User type configurations
+  user_types:
+    free:
+      requests_per_minute: 10
+      requests_per_hour: 100
+      requests_per_day: 500
+      burst_capacity: 5
+      strategy: "token_bucket"
+      bypass_allowed: false
+      priority_weight: 0.5
+    
+    basic:
+      requests_per_minute: 30
+      requests_per_hour: 500
+      requests_per_day: 2000
+      burst_capacity: 10
+      strategy: "token_bucket"
+      bypass_allowed: false
+      priority_weight: 0.75
+    
+    premium:
+      requests_per_minute: 100
+      requests_per_hour: 2000
+      requests_per_day: 10000
+      burst_capacity: 20
+      strategy: "token_bucket"
+      bypass_allowed: true
+      priority_weight: 1.5
+    
+    enterprise:
+      requests_per_minute: 500
+      requests_per_hour: 10000
+      requests_per_day: 100000
+      burst_capacity: 50
+      strategy: "token_bucket"
+      bypass_allowed: true
+      priority_weight: 2.0
+    
+    admin:
+      requests_per_minute: 1000
+      requests_per_hour: 50000
+      requests_per_day: 1000000
+      burst_capacity: 100
+      strategy: "token_bucket"
+      bypass_allowed: true
+      priority_weight: 10.0
+
+  # Dynamic adjustment settings
+  dynamic_adjustment:
+    enabled: true
+    load_threshold_high: 0.8  # Reduce limits when load > 80%
+    load_threshold_low: 0.3   # Increase limits when load < 30%
+    adjustment_factor_high: 0.95  # 5% reduction per adjustment
+    adjustment_factor_low: 1.05   # 5% increase per adjustment
+    min_load_factor: 0.5     # Never reduce below 50% of base limits
+    max_load_factor: 2.0     # Never increase above 200% of base limits
+    history_size: 100        # Keep last 100 load measurements
+
+  # Endpoint-specific configurations
+  endpoints:
+    predict:
+      free:
+        requests_per_minute: 5
+        burst_capacity: 3
+      basic:
+        requests_per_minute: 20
+        burst_capacity: 10
+      premium:
+        requests_per_minute: 100
+        burst_capacity: 20
+      enterprise:
+        requests_per_minute: 500
+        burst_capacity: 50
+    
+    batch:
+      free:
+        requests_per_minute: 2
+        burst_capacity: 1
+      basic:
+        requests_per_minute: 10
+        burst_capacity: 5
+      premium:
+        requests_per_minute: 50
+        burst_capacity: 15
+      enterprise:
+        requests_per_minute: 200
+        burst_capacity: 40
+    
+    analytics:
+      free:
+        requests_per_minute: 10
+        burst_capacity: 5
+      basic:
+        requests_per_minute: 30
+        burst_capacity: 15
+      premium:
+        requests_per_minute: 100
+        burst_capacity: 30
+      enterprise:
+        requests_per_minute: 500
+        burst_capacity: 100
+    
+    queue_status:
+      free:
+        requests_per_minute: 20
+        burst_capacity: 10
+      basic:
+        requests_per_minute: 60
+        burst_capacity: 30
+      premium:
+        requests_per_minute: 200
+        burst_capacity: 50
+      enterprise:
+        requests_per_minute: 1000
+        burst_capacity: 200
+
+  # Graceful degradation settings
+  graceful_degradation:
+    enabled: true
+    critical_load_threshold: 0.95  # 95% system load
+    high_load_threshold: 0.85       # 85% system load
+    fallback_responses:
+      predict:
+        error: "Service temporarily unavailable"
+        message: "Prediction service is under high load. Please try again later."
+        cached_result_available: false
+      batch:
+        error: "Service temporarily unavailable"
+        message: "Batch processing service is under high load. Please try again later."
+      analytics:
+        error: "Service temporarily unavailable"
+        message: "Analytics service is under high load. Please try again later."
+
+  # Monitoring and alerts
+  monitoring:
+    enabled: true
+    alert_thresholds:
+      high_violations: 100      # Alert when violations > 100 per hour
+      many_blocked_users: 50    # Alert when blocked users > 50
+      bypass_usage: 10          # Alert when bypass usage > 10 per hour
+    metrics_collection_interval: 30  # seconds
+
+  # Cache integration
+  cache_integration:
+    enabled: true
+    cache_rate_limit_states: true
+    cache_analytics: true
+    state_ttl: 300      # 5 minutes
+    analytics_ttl: 600  # 10 minutes
+
+# Example API key configurations for user type detection
+api_keys:
+  # Enterprise API keys (prefix: ent_)
+  enterprise_keys:
+    - "ent_1234567890abcdef"
+    - "ent_fedcba0987654321"
+  
+  # Premium API keys (prefix: premium_)
+  premium_keys:
+    - "premium_abcdef123456789"
+    - "premium_987654321fedcba"
+  
+  # Basic API keys (prefix: basic_)
+  basic_keys:
+    - "basic_1111111111111111"
+    - "basic_2222222222222222"
+
+# Headers for user identification
+user_identification:
+  user_id_headers:
+    - "X-User-ID"
+    - "User-ID"
+  user_type_headers:
+    - "X-User-Type"
+    - "User-Type"
+  api_key_headers:
+    - "X-API-Key"
+    - "API-Key"
+  bypass_headers:
+    - "X-Rate-Limit-Bypass"
+    - "Rate-Limit-Bypass"
+
+# IP-based settings
+ip_settings:
+  # IP whitelist for bypassing rate limits
+  whitelist:
+    - "127.0.0.1"
+    - "::1"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  
+  # IP blacklist for blocking
+  blacklist:
+    - "192.168.1.100"  # Example malicious IP
+  
+  # Trusted proxy IPs (for X-Forwarded-For header processing)
+  trusted_proxies:
+    - "127.0.0.1"
+    - "::1"
+
+# Response headers
+response_headers:
+  include_rate_limit_headers: true
+  include_user_type: true
+  include_remaining: true
+  include_reset_time: true
+  include_bypass_info: true
+
+# Logging settings
+logging:
+  log_rate_limit_events: true
+  log_violations: true
+  log_bypass_usage: true
+  log_dynamic_adjustments: true
+  log_level: "INFO"
+
+# Performance settings
+performance:
+  max_concurrent_checks: 1000
+  cleanup_batch_size: 100
+  analytics_retention_hours: 24
+  state_retention_hours: 24

@@ -1,89 +1,54 @@
-# Multi-stage build for production-ready Flask ML API
-# Stage 1: Dependencies stage
-FROM python:3.11-slim AS dependencies
+# Use Python 3.11 slim image for smaller size
+FROM python:3.11-slim
 
-# Set build arguments
-ARG BUILD_ENV=production
-
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender-dev \
-        libgomp1 \
-        libglib2.0-0 \
-        libgtk-3-0 \
-        libavcodec-dev \
-        libavformat-dev \
-        libswscale-dev \
-        && rm -rf /var/lib/apt/lists/*
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Set working directory
 WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libpq-dev \
+    libffi-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libwebp-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Stage 2: Production stage
-FROM python:3.11-slim AS production
-
-# Security: Create non-root user
-RUN groupadd -r appuser && \
-    useradd -r -g appuser -d /app -s /bin/bash appuser
-
-# Install runtime system dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
-        libgomp1 \
-        libgtk-3-0 \
-        libavcodec58 \
-        libavformat58 \
-        libswscale5 \
-        curl \
-        && rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
-
-# Set working directory
-WORKDIR /app
-
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    FLASK_ENV=production \
-    FLASK_APP=app.py
-
-# Copy Python dependencies from dependencies stage
-COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=dependencies /usr/local/bin /usr/local/bin
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
 
 # Copy application code
-COPY --chown=appuser:appuser . .
+COPY . .
 
-# Create necessary directories with proper permissions
-RUN mkdir -p /app/uploads /app/models /app/logs && \
-    chown -R appuser:appuser /app/uploads /app/models /app/logs
+# Create necessary directories
+RUN mkdir -p uploads logs reports test_uploads
 
-# Change to non-root user
+# Set permissions
+RUN chmod +x *.py
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN chown -R appuser:appuser /app
 USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
 
 # Expose port
 EXPOSE 5000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:5000/health || exit 1
-
-# Run the application
+# Default command
 CMD ["python", "app.py"]
