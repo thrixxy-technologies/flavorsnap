@@ -17,5 +17,15 @@
   "language_yo": "Yorùbá",
   "error_classify_retry": "Ìpínlẹ̀ àwòrán kùnà. Jọ̀wọ́ gbìyànjú lẹ́ẹ̀kan sí i.",
   "classify_food": "Pínlẹ̀ oúnjẹ",
-  "classification_result": "Àbájáde ìpínlẹ̀"
+  "classification_result": "Àbájáde ìpínlẹ̀",
+  "shortcut_hint": "Tẹ 'O' láti ṣí kámẹ́rà, 'C' láti pínlẹ̀ oúnjẹ, 'R' láti tun bẹrẹ",
+  "clear_image": "Pa àwòrán rẹ́",
+  "reset": "Tun bẹrẹ",
+  "history": "Ìtàn",
+  "export_json": "Export JSON",
+  "export_csv": "Export CSV",
+  "clear_history": "Mú ìtàn kúrò",
+  "no_history_yet": "Oúnjẹ rẹ yóò hàn níhìn-ín.",
+  "confirm_clear_history": "Ǹjẹ́ ó dá ẹ lójú pé o fẹ́ mú ìtàn oúnjẹ rẹ kúrò?"
+  "reset": "Tun bẹrẹ"
 }

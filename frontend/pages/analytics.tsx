@@ -1,6 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import React, { useState, useEffect, Suspense } from 'react';
 import { TrendingUp, Users, Activity, Download, Calendar, Filter, RefreshCw, Eye, Clock, CheckCircle, AlertCircle } from 'lucide-react';
+import AnalyticsCard from '../components/AnalyticsCard';
+
+const UsageStatisticsChart = React.lazy(() => import('../components/UsageStatisticsChart'));
+const ModelPerformanceChart = React.lazy(() => import('../components/ModelPerformanceChart'));
+const UserEngagementChart = React.lazy(() => import('../components/UserEngagementChart'));
+const RealTimeActivity = React.lazy(() => import('../components/RealTimeActivity'));
 
 interface UsageStats {
   date: string;
@@ -21,6 +26,30 @@ interface UserEngagement {
   value: number;
   color: string;
 }
+
+const activities = [
+  {
+    id: '1',
+    type: 'classification' as const,
+    title: 'Classification Request',
+    description: 'Jollof Rice - 95.2% confidence',
+    timestamp: '2 min ago'
+  },
+  {
+    id: '2',
+    type: 'model_update' as const,
+    title: 'Model Update',
+    description: 'Accuracy improved to 94.5%',
+    timestamp: '15 min ago'
+  },
+  {
+    id: '3',
+    type: 'alert' as const,
+    title: 'High Traffic Alert',
+    description: '150+ requests in last hour',
+    timestamp: '1 hour ago'
+  }
+];
 
 const AnalyticsDashboard: React.FC = () => {
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
@@ -105,154 +134,78 @@ const AnalyticsDashboard: React.FC = () => {
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-
-          <div className="flex justify-between items-center">
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">Analytics Dashboard</h1>
-              <p className="text-gray-600 mt-1">Monitor usage patterns, model performance, and user engagement</p>
-            </div>
-
-              >
-                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
-in
-              >
-                <Download className="w-4 h-4" />
-                Export Report
-              </button>
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">Analytics Dashboard</h1>
+            <p className="text-gray-600 mt-1">Monitor usage patterns, model performance, and user engagement</p>
+          </div>
+          <div className="flex gap-4">
+            <button
+              onClick={handleRefresh}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Export Report
+            </button>
+          </div>
+        </div>
 
 
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
           {statsCards.map((stat, index) => (
-            <div key={index} className="bg-white rounded-lg shadow-sm p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-gray-600 text-sm">{stat.title}</p>
-                  <p className="text-2xl font-bold text-gray-900 mt-1">{stat.value}</p>
-                  <p className={`text-sm mt-2 ${stat.change.startsWith('+') ? 'text-green-600' : 'text-red-600'}`}>
-                    {stat.change}
-                  </p>
-                </div>
-                <div className={`${stat.color} p-3 rounded-lg`}>
-                  <stat.icon className="w-6 h-6 text-white" />
-                </div>
-              </div>
-            </div>
+            <AnalyticsCard key={index} {...stat} />
           ))}
         </div>
 
         {/* Date Range Filter */}
-
-                type="date"
-                value={dateRange.start}
-                onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
-                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-
-                type="date"
-                value={dateRange.end}
-                onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
-                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
+        <div className="mb-6">
+          <div className="flex gap-4 items-center">
+            <label className="text-sm font-medium text-gray-700">Start Date:</label>
+            <input
+              type="date"
+              value={dateRange.start}
+              onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <label className="text-sm font-medium text-gray-700">End Date:</label>
+            <input
+              type="date"
+              value={dateRange.end}
+              onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
           </div>
-n
+        </div>
 
         {/* Charts Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
           {/* Usage Statistics */}
-          <div className="bg-white rounded-lg shadow-sm p-6">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4">Usage Statistics</h2>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={usageData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Line type="monotone" dataKey="requests" stroke="#3B82F6" name="Requests" />
-                <Line type="monotone" dataKey="users" stroke="#10B981" name="Active Users" />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+          <Suspense fallback={<div className="bg-white rounded-lg shadow-sm p-6"><div className="animate-pulse h-64 bg-gray-200 rounded"></div></div>}>
+            <UsageStatisticsChart data={usageData} />
+          </Suspense>
 
           {/* Model Performance */}
-          <div className="bg-white rounded-lg shadow-sm p-6">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4">Model Performance</h2>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={modelPerformance}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="model" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="accuracy" fill="#8B5CF6" name="Accuracy (%)" />
-                <Bar dataKey="confidence" fill="#F59E0B" name="Confidence (%)" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <Suspense fallback={<div className="bg-white rounded-lg shadow-sm p-6"><div className="animate-pulse h-64 bg-gray-200 rounded"></div></div>}>
+            <ModelPerformanceChart data={modelPerformance} />
+          </Suspense>
 
           {/* User Engagement */}
-          <div className="bg-white rounded-lg shadow-sm p-6">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4">Food Classification Distribution</h2>
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie
-                  data={userEngagement}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ category, value }) => `${category}: ${value}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {userEngagement.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
+          <Suspense fallback={<div className="bg-white rounded-lg shadow-sm p-6"><div className="animate-pulse h-64 bg-gray-200 rounded"></div></div>}>
+            <UserEngagementChart data={userEngagement} />
+          </Suspense>
 
           {/* Real-time Activity */}
-          <div className="bg-white rounded-lg shadow-sm p-6">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4">Real-time Activity</h2>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <Eye className="w-5 h-5 text-blue-500" />
-                  <div>
-                    <p className="font-medium">Classification Request</p>
-                    <p className="text-sm text-gray-600">Jollof Rice - 95.2% confidence</p>
-                  </div>
-                </div>
-                <span className="text-sm text-gray-500">2 min ago</span>
-              </div>
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <CheckCircle className="w-5 h-5 text-green-500" />
-                  <div>
-                    <p className="font-medium">Model Update</p>
-                    <p className="text-sm text-gray-600">Accuracy improved to 94.5%</p>
-                  </div>
-                </div>
-                <span className="text-sm text-gray-500">15 min ago</span>
-              </div>
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5 text-orange-500" />
-                  <div>
-                    <p className="font-medium">High Traffic Alert</p>
-                    <p className="text-sm text-gray-600">150+ requests in last hour</p>
-                  </div>
-                </div>
-                <span className="text-sm text-gray-500">1 hour ago</span>
-              </div>
-            </div>
-          </div>
+          <Suspense fallback={<div className="bg-white rounded-lg shadow-sm p-6"><div className="animate-pulse h-32 bg-gray-200 rounded"></div></div>}>
+            <RealTimeActivity activities={activities} />
+          </Suspense>
         </div>
       </div>
     </div>

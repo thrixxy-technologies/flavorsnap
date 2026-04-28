@@ -1,0 +1,84 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: advanced-load-balancer-metrics
+  namespace: flavorsnap
+  labels:
+    app: advanced-load-balancer
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: advanced-load-balancer
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: advanced-load-balancer-rules
+  namespace: flavorsnap
+  labels:
+    app: advanced-load-balancer
+    release: prometheus
+spec:
+  groups:
+  - name: advanced-load-balancer
+    rules:
+    - alert: LoadBalancerHighCPUUsage
+      expr: rate(container_cpu_usage_seconds_total{pod=~"advanced-load-balancer-.*"}[5m]) > 0.8
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Load balancer high CPU usage"
+        description: "Load balancer CPU usage is above 80% for more than 5 minutes"
+    
+    - alert: LoadBalancerHighMemoryUsage
+      expr: container_memory_usage_bytes{pod=~"advanced-load-balancer-.*"} / container_spec_memory_limit_bytes > 0.8
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Load balancer high memory usage"
+        description: "Load balancer memory usage is above 80% for more than 5 minutes"
+    
+    - alert: LoadBalancerHighResponseTime
+      expr: histogram_quantile(0.95, rate(nginx_http_request_duration_seconds_bucket[5m])) > 2
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Load balancer high response time"
+        description: "95th percentile response time is above 2 seconds"
+    
+    - alert: LoadBalancerHighErrorRate
+      expr: rate(nginx_http_requests_total{status=~"5.."}[5m]) / rate(nginx_http_requests_total[5m]) > 0.05
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Load balancer high error rate"
+        description: "Error rate is above 5% for more than 5 minutes"
+    
+    - alert: LoadBalancerUpstreamDown
+      expr: nginx_upstream_health_checks_total{status="failed"} > 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Load balancer upstream server down"
+        description: "One or more upstream servers are failing health checks"
+    
+    - alert: LoadBalancerRateLimitExceeded
+      expr: rate(nginx_http_requests_total{status="429"}[5m]) > 10
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Load balancer rate limiting active"
+        description: "Rate limiting is rejecting more than 10 requests per second"

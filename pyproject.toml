@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+# Avoid accidentally running ad-hoc scripts like `test_shortcuts.py`
+# that live at the repo root. We only collect from `tests/`.
+addopts = "-ra"
+
+markers = [
+  "unit: Unit tests for core modules",
+  "integration: Integration tests for API/UI boundaries",
+  "performance_smoke: Quick performance checks suitable for PR CI",
+  "performance_full: Full performance benchmarks (nightly/on-demand)",
+]
+
+strict_markers = true
+

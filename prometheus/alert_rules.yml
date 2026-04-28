@@ -1,0 +1,153 @@
+groups:
+  # -----------------------------------------------------------------------
+  # HTTP / API alerts
+  # -----------------------------------------------------------------------
+  - name: flavorsnap_http
+    rules:
+      - alert: HighAPIErrorRate
+        expr: |
+          sum(rate(flavorsnap_http_errors_total[5m])) /
+          sum(rate(flavorsnap_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High API error rate (>5%)"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      - alert: HighAPILatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(flavorsnap_http_request_duration_seconds_bucket[5m])) by (le, endpoint)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API p95 latency (>2s)"
+          description: "p95 latency for {{ $labels.endpoint }} is {{ $value }}s."
+
+      - alert: APIDown
+        expr: up{job="flavorsnap-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "FlavorSnap API is down"
+          description: "The FlavorSnap API has been unreachable for more than 1 minute."
+
+  # -----------------------------------------------------------------------
+  # Model inference alerts
+  # -----------------------------------------------------------------------
+  - name: flavorsnap_inference
+    rules:
+      - alert: HighInferenceLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(flavorsnap_model_inference_duration_seconds_bucket[5m])) by (le, model_version)
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High model inference p95 latency (>1s)"
+          description: "Model {{ $labels.model_version }} p95 inference time is {{ $value }}s."
+
+      - alert: ModelInferenceErrorRate
+        expr: |
+          sum(rate(flavorsnap_model_inference_total{status="error"}[5m])) /
+          sum(rate(flavorsnap_model_inference_total[5m])) > 0.02
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model inference error rate >2%"
+          description: "Inference error rate is {{ $value | humanizePercentage }}."
+
+      - alert: ModelNotLoaded
+        expr: flavorsnap_model_loaded == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ML model is not loaded"
+          description: "The FlavorSnap ML model has not been loaded for more than 2 minutes."
+
+  # -----------------------------------------------------------------------
+  # Cache alerts
+  # -----------------------------------------------------------------------
+  - name: flavorsnap_cache
+    rules:
+      - alert: LowCacheHitRatio
+        expr: |
+          sum(rate(flavorsnap_cache_hits_total[10m])) /
+          (sum(rate(flavorsnap_cache_hits_total[10m])) + sum(rate(flavorsnap_cache_misses_total[10m]))) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache hit ratio below 30%"
+          description: "Cache hit ratio is {{ $value | humanizePercentage }} over the last 10 minutes."
+
+  # -----------------------------------------------------------------------
+  # System resource alerts
+  # -----------------------------------------------------------------------
+  - name: flavorsnap_system
+    rules:
+      - alert: HighCPUUsage
+        expr: flavorsnap_system_cpu_usage_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage (>80%)"
+          description: "CPU usage is {{ $value }}%."
+
+      - alert: CriticalCPUUsage
+        expr: flavorsnap_system_cpu_usage_percent > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU usage (>95%)"
+          description: "CPU usage is {{ $value }}%."
+
+      - alert: HighMemoryUsage
+        expr: |
+          flavorsnap_system_memory_usage_bytes /
+          flavorsnap_system_memory_total_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage (>85%)"
+          description: "Memory usage is {{ $value | humanizePercentage }}."
+
+      - alert: CriticalMemoryUsage
+        expr: |
+          flavorsnap_system_memory_usage_bytes /
+          flavorsnap_system_memory_total_bytes > 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical memory usage (>95%)"
+          description: "Memory usage is {{ $value | humanizePercentage }}."
+
+      - alert: HighDiskUsage
+        expr: flavorsnap_system_disk_usage_percent > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk usage (>85%)"
+          description: "Disk usage on {{ $labels.mount_point }} is {{ $value }}%."
+
+      - alert: CriticalDiskUsage
+        expr: flavorsnap_system_disk_usage_percent > 95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk usage (>95%)"
+          description: "Disk usage on {{ $labels.mount_point }} is {{ $value }}%."

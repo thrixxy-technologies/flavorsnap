@@ -1,0 +1,63 @@
+# FlavorSnap Testing Configuration
+# Environment: testing
+
+app:
+  debug: true
+  host: "127.0.0.1"
+  port: 5002
+  secret_key: "test-secret-key"
+
+database:
+  type: "sqlite"
+  host: ""
+  port: 0
+  name: "./test.db"
+  user: ""
+  password: ""
+  pool_size: 1
+  max_overflow: 0
+  pool_timeout: 5
+  pool_recycle: 300
+
+logging:
+  level: "DEBUG"
+  enable_console: true
+  file: "./logs/test.log"
+  max_bytes: 1048576  # 1MB
+  backup_count: 3
+
+security:
+  jwt_secret_key: "test-jwt-secret"
+  jwt_expiration_hours: 1
+  bcrypt_rounds: 4
+  rate_limit:
+    requests_per_minute: 1000
+    burst_size: 50
+
+monitoring:
+  enable_metrics: false
+  health_check_interval: 5
+  performance_tracking: false
+
+file_storage:
+  upload_folder: "./test_uploads"
+  max_file_size: 5242880  # 5MB
+  auto_cleanup_days: 1
+
+cache:
+  type: "memory"
+  host: ""
+  port: 0
+  password: ""
+  db: 0
+  ttl: 60
+
+ml_model:
+  model_path: "./test_model.pth"
+  device: "cpu"
+
+features:
+  enable_hot_reload: false
+  enable_config_validation: true
+  enable_backup: false
+  enable_versioning: false

@@ -1,7 +1,58 @@
-from flask import Flask, send_from_directory, jsonify
-from flask_cors import CORS
-import yaml
+from flask import Flask, jsonify, Response
 import os
+import re
+import yaml
+
+
+DOC_ENDPOINTS = {"/docs", "/openapi.yaml", "/openapi.json", "/redoc"}
+
+
+def _spec_file_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "openapi.yaml")
+
+
+def _to_openapi_path(flask_route: str) -> str:
+    # Convert Flask route vars (<id>, <path:filename>) to OpenAPI style ({id}, {filename})
+    return re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", flask_route)
+
+
+def _load_and_enrich_spec(app: Flask):
+    with open(_spec_file_path(), "r", encoding="utf-8") as f:
+        spec = yaml.safe_load(f) or {}
+
+    paths = spec.setdefault("paths", {})
+
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == "static":
+            continue
+
+        route_path = _to_openapi_path(rule.rule)
+        if route_path in DOC_ENDPOINTS:
+            continue
+
+        methods = sorted(m for m in rule.methods if m not in {"HEAD", "OPTIONS"})
+        if not methods:
+            continue
+
+        path_item = paths.setdefault(route_path, {})
+        view_func = app.view_functions.get(rule.endpoint)
+        summary = ""
+        if view_func and view_func.__doc__:
+            summary = view_func.__doc__.strip().splitlines()[0]
+
+        for method in methods:
+            method_key = method.lower()
+            if method_key in path_item:
+                continue
+
+            path_item[method_key] = {
+                "summary": summary or f"{method} {route_path}",
+                "responses": {
+                    "200": {"description": "Successful response"}
+                }
+            }
+
+    return spec
 
 def setup_swagger(app: Flask):
     """Setup Swagger UI and OpenAPI documentation"""
@@ -50,8 +101,9 @@ def setup_swagger(app: Flask):
     def openapi_spec():
         """Serve OpenAPI specification"""
         try:
-            with open('openapi.yaml', 'r') as f:
-                return yaml.safe_load(f), 200, {'Content-Type': 'application/x-yaml'}
+            spec = _load_and_enrich_spec(app)
+            yaml_content = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True)
+            return Response(yaml_content, mimetype='application/x-yaml')
         except FileNotFoundError:
             return jsonify({'error': 'OpenAPI specification not found'}), 404
     
@@ -59,9 +111,8 @@ def setup_swagger(app: Flask):
     def openapi_json():
         """Serve OpenAPI specification as JSON"""
         try:
-            with open('openapi.yaml', 'r') as f:
-                spec = yaml.safe_load(f)
-                return jsonify(spec)
+            spec = _load_and_enrich_spec(app)
+            return jsonify(spec)
         except FileNotFoundError:
             return jsonify({'error': 'OpenAPI specification not found'}), 404
     

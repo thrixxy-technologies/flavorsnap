@@ -1,0 +1,214 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  schedule:
+    # Run security scans daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  python-security-scan:
+    runs-on: ubuntu-latest
+    name: Python Security Scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit semgrep
+        
+    - name: Run Safety (dependency vulnerability scanning)
+      run: |
+        find . -name "requirements.txt" -exec safety check -r {} \; || true
+        safety check --json --output safety-report.json || true
+        
+    - name: Run Bandit (code security analysis)
+      run: |
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . || true
+        
+    - name: Run Semgrep (static analysis)
+      run: |
+        semgrep --config=auto --json --output=semgrep-report.json || true
+        semgrep --config=auto || true
+        
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: python-security-reports
+        path: |
+          safety-report.json
+          bandit-report.json
+          semgrep-report.json
+        retention-days: 30
+
+  rust-security-scan:
+    runs-on: ubuntu-latest
+    name: Rust Security Scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+        
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+          
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+      
+    - name: Run cargo audit (dependency vulnerability scanning)
+      run: |
+        cargo audit --json > audit-report.json || true
+        cargo audit || true
+        
+    - name: Run cargo clippy (linting)
+      run: |
+        cargo clippy --all-targets --all-features -- -D warnings || true
+        
+    - name: Run cargo fmt check
+      run: cargo fmt --all -- --check
+      
+    - name: Upload Rust security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: rust-security-reports
+        path: |
+          audit-report.json
+        retention-days: 30
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    name: Secret Scanning
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Run TruffleHog (secret scanning)
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+        
+    - name: Run Gitleaks (secret scanning)
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  docker-security-scan:
+    runs-on: ubuntu-latest
+    name: Docker Security Scan
+    if: contains(github.event.head_commit.modified, 'Dockerfile') || github.event_name == 'schedule'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Build Docker image
+      run: |
+        if [ -f "Dockerfile" ]; then
+          docker build -t flavorsnap-test .
+        else
+          echo "No Dockerfile found, skipping Docker security scan"
+          exit 0
+        fi
+        
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: flavorsnap-test
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  security-summary:
+    runs-on: ubuntu-latest
+    name: Security Summary
+    needs: [python-security-scan, rust-security-scan, secret-scan]
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      
+    - name: Create security summary
+      run: |
+        echo "# Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -d "python-security-reports" ]; then
+          echo "### Python Security" >> $GITHUB_STEP_SUMMARY
+          if [ -f "python-security-reports/safety-report.json" ]; then
+            echo "- ✅ Safety dependency scan completed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ Safety scan had issues" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f "python-security-reports/bandit-report.json" ]; then
+            echo "- ✅ Bandit code analysis completed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ Bandit scan had issues" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -d "rust-security-reports" ]; then
+          echo "### Rust Security" >> $GITHUB_STEP_SUMMARY
+          if [ -f "rust-security-reports/audit-report.json" ]; then
+            echo "- ✅ Cargo audit completed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠️ Cargo audit had issues" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### Recommendations" >> $GITHUB_STEP_SUMMARY
+        echo "- Review any security findings in the uploaded artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "- Address high-severity vulnerabilities promptly" >> $GITHUB_STEP_SUMMARY
+        echo "- Regular updates of dependencies are recommended" >> $GITHUB_STEP_SUMMARY

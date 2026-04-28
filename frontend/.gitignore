@@ -9,7 +9,11 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
-
+.kiro
+pull_request_274.md
+pull_request_303.md
+pull_request_301.md
+pull_request_302.md
 # testing
 /coverage
 

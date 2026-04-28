@@ -9,11 +9,20 @@ from typing import Dict, List, Tuple, Any, Optional
 import json
 import base64
 import io
+import shap
+import lime
+import lime.lime_image
+from lime.wrappers.scikit_image import SegmentationAlgorithm
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from skimage.segmentation import mark_boundaries
+import warnings
+warnings.filterwarnings('ignore')
 
 class ModelExplainer:
     def __init__(self, model, target_layers: List[str] = None):
         """
-        Initialize the model explainer with Grad-CAM capability
+        Initialize the model explainer with comprehensive XAI capabilities
         
         Args:
             model: The PyTorch model to explain
@@ -32,8 +41,38 @@ class ModelExplainer:
         self.gradients = {}
         self.activations = {}
         
+        # Initialize SHAP explainer
+        self.shap_explainer = None
+        
+        # Initialize LIME explainer
+        self.lime_explainer = None
+        
         # Register hooks
         self._register_hooks()
+        
+        # Initialize explainers
+        self._initialize_explainers()
+    
+    def _initialize_explainers(self):
+        """Initialize SHAP and LIME explainers"""
+        try:
+            # Initialize SHAP explainer (using GradientExplainer for PyTorch models)
+            # Create a dummy input for initialization
+            dummy_input = torch.zeros((1, 3, 224, 224))
+            if hasattr(self.model, 'cpu'):
+                model_cpu = self.model.cpu()
+            else:
+                model_cpu = self.model
+            
+            self.shap_explainer = shap.GradientExplainer(model_cpu, dummy_input)
+            
+            # Initialize LIME explainer
+            self.lime_explainer = lime.lime_image.LimeImageExplainer()
+            
+        except Exception as e:
+            print(f"Warning: Could not initialize explainers: {e}")
+            self.shap_explainer = None
+            self.lime_explainer = None
     
     def _register_hooks(self):
         """Register forward and backward hooks to capture activations and gradients"""
@@ -152,6 +191,288 @@ class ModelExplainer:
             feature_importance[f"feature_{idx.item()}"] = importance_scores[idx].item()
         
         return feature_importance
+    
+    def generate_shap_values(self, input_tensor: torch.Tensor, class_idx: int = None) -> Dict[str, Any]:
+        """
+        Generate SHAP values for model explanation
+        
+        Args:
+            input_tensor: Input tensor of shape (1, C, H, W)
+            class_idx: Target class index (if None, uses predicted class)
+            
+        Returns:
+            Dictionary containing SHAP values and visualizations
+        """
+        if self.shap_explainer is None:
+            return {"error": "SHAP explainer not initialized"}
+        
+        try:
+            # Ensure model is on CPU for SHAP
+            model_device = next(self.model.parameters()).device
+            if model_device != torch.device('cpu'):
+                self.model.cpu()
+            
+            # Get model prediction
+            with torch.no_grad():
+                output = self.model(input_tensor)
+                probabilities = torch.nn.functional.softmax(output[0], dim=0)
+                
+            if class_idx is None:
+                class_idx = torch.argmax(probabilities).item()
+            
+            # Generate SHAP values
+            shap_values = self.shap_explainer.shap_values(input_tensor, ranked_outputs=1)
+            
+            # Handle different SHAP output formats
+            if isinstance(shap_values, list):
+                shap_values = shap_values[0] if len(shap_values) > 0 else shap_values
+            
+            # Convert to numpy and process
+            if isinstance(shap_values, torch.Tensor):
+                shap_values = shap_values.detach().cpu().numpy()
+            
+            # Create SHAP visualization
+            shap_image = self._create_shap_visualization(input_tensor, shap_values, class_idx)
+            
+            # Calculate feature importance from SHAP values
+            shap_importance = self._calculate_shap_importance(shap_values)
+            
+            # Restore model device
+            self.model.to(model_device)
+            
+            return {
+                "shap_values": shap_values.tolist() if hasattr(shap_values, 'tolist') else str(shap_values),
+                "shap_image": shap_image,
+                "feature_importance": shap_importance,
+                "class_idx": class_idx,
+                "explanation": f"SHAP values show how each pixel/region contributed to the classification of class {class_idx}"
+            }
+            
+        except Exception as e:
+            return {"error": f"Failed to generate SHAP values: {str(e)}"}
+    
+    def _create_shap_visualization(self, input_tensor: torch.Tensor, shap_values: np.ndarray, class_idx: int) -> str:
+        """Create SHAP visualization and return as base64 string"""
+        try:
+            # Convert input tensor to numpy
+            input_np = input_tensor.squeeze().permute(1, 2, 0).cpu().numpy()
+            
+            # Denormalize the image
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            input_np = input_np * std + mean
+            input_np = np.clip(input_np, 0, 1)
+            
+            # Create visualization
+            plt.figure(figsize=(12, 4))
+            
+            # Original image
+            plt.subplot(1, 3, 1)
+            plt.imshow(input_np)
+            plt.title('Original Image')
+            plt.axis('off')
+            
+            # SHAP values
+            if len(shap_values.shape) == 3:
+                shap_plot = shap_values.transpose(1, 2, 0)
+                # Take absolute values for visualization
+                shap_abs = np.abs(shap_plot)
+                if shap_abs.shape[2] > 3:
+                    shap_abs = shap_abs[:, :, :3]
+                shap_abs = shap_abs / (shap_abs.max() + 1e-8)
+                
+                plt.subplot(1, 3, 2)
+                plt.imshow(shap_abs)
+                plt.title('SHAP Values (Absolute)')
+                plt.axis('off')
+                
+                # Combined visualization
+                plt.subplot(1, 3, 3)
+                plt.imshow(input_np)
+                plt.imshow(shap_abs, alpha=0.5, cmap='jet')
+                plt.title('SHAP Overlay')
+                plt.axis('off')
+            
+            plt.tight_layout()
+            
+            # Save to base64
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', bbox_inches='tight', dpi=150)
+            buffer.seek(0)
+            image_base64 = base64.b64encode(buffer.getvalue()).decode()
+            plt.close()
+            
+            return f"data:image/png;base64,{image_base64}"
+            
+        except Exception as e:
+            print(f"Error creating SHAP visualization: {e}")
+            return ""
+    
+    def _calculate_shap_importance(self, shap_values: np.ndarray) -> Dict[str, float]:
+        """Calculate feature importance from SHAP values"""
+        try:
+            if len(shap_values.shape) == 3:
+                # Average absolute SHAP values across spatial dimensions
+                importance = np.mean(np.abs(shap_values), axis=(1, 2))
+            else:
+                importance = np.abs(shap_values.flatten())
+            
+            # Get top features
+            top_k = min(10, len(importance))
+            top_indices = np.argsort(importance)[::-1][:top_k]
+            
+            feature_importance = {}
+            for i, idx in enumerate(top_indices):
+                feature_importance[f"feature_{idx}"] = float(importance[idx])
+            
+            return feature_importance
+            
+        except Exception as e:
+            print(f"Error calculating SHAP importance: {e}")
+            return {}
+    
+    def generate_lime_explanation(self, input_tensor: torch.Tensor, class_idx: int = None, 
+                                 num_samples: int = 1000) -> Dict[str, Any]:
+        """
+        Generate LIME explanation for model prediction
+        
+        Args:
+            input_tensor: Input tensor of shape (1, C, H, W)
+            class_idx: Target class index (if None, uses predicted class)
+            num_samples: Number of samples for LIME explanation
+            
+        Returns:
+            Dictionary containing LIME explanation and visualization
+        """
+        if self.lime_explainer is None:
+            return {"error": "LIME explainer not initialized"}
+        
+        try:
+            # Convert tensor to numpy image
+            input_np = input_tensor.squeeze().permute(1, 2, 0).cpu().numpy()
+            
+            # Denormalize the image
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            input_np = input_np * std + mean
+            input_np = np.clip(input_np, 0, 1)
+            
+            # Get model prediction
+            with torch.no_grad():
+                output = self.model(input_tensor)
+                probabilities = torch.nn.functional.softmax(output[0], dim=0)
+                
+            if class_idx is None:
+                class_idx = torch.argmax(probabilities).item()
+            
+            # Create prediction function for LIME
+            def predict_fn(images):
+                """Prediction function for LIME"""
+                batch = []
+                for img in images:
+                    # Normalize image
+                    img_normalized = (img - mean) / std
+                    img_tensor = torch.from_numpy(img_normalized).permute(2, 0, 1).float()
+                    batch.append(img_tensor)
+                
+                batch_tensor = torch.stack(batch)
+                
+                with torch.no_grad():
+                    outputs = self.model(batch_tensor)
+                    probs = torch.nn.functional.softmax(outputs, dim=1)
+                    
+                return probs.cpu().numpy()
+            
+            # Generate LIME explanation
+            explanation = self.lime_explainer.explain_instance(
+                input_np,
+                predict_fn,
+                top_labels=5,
+                hide_color=0,
+                num_samples=num_samples,
+                segmentation_fn=SegmentationAlgorithm('quickshift', kernel_size=4, max_dist=200, ratio=0.2)
+            )
+            
+            # Get explanation for target class
+            temp, mask = explanation.get_image_and_mask(
+                class_idx,
+                positive_only=True,
+                num_features=10,
+                hide_rest=False
+            )
+            
+            # Create LIME visualization
+            lime_image = self._create_lime_visualization(input_np, temp, mask, explanation)
+            
+            # Get feature importance
+            feature_importance = self._extract_lime_importance(explanation, class_idx)
+            
+            return {
+                "lime_image": lime_image,
+                "feature_importance": feature_importance,
+                "class_idx": class_idx,
+                "segments": mask.tolist() if hasattr(mask, 'tolist') else str(mask),
+                "explanation": f"LIME highlights regions that were most important for classifying as class {class_idx}"
+            }
+            
+        except Exception as e:
+            return {"error": f"Failed to generate LIME explanation: {str(e)}"}
+    
+    def _create_lime_visualization(self, original_image: np.ndarray, temp: np.ndarray, 
+                                  mask: np.ndarray, explanation) -> str:
+        """Create LIME visualization and return as base64 string"""
+        try:
+            plt.figure(figsize=(15, 5))
+            
+            # Original image
+            plt.subplot(1, 3, 1)
+            plt.imshow(original_image)
+            plt.title('Original Image')
+            plt.axis('off')
+            
+            # LIME explanation
+            plt.subplot(1, 3, 2)
+            plt.imshow(mark_boundaries(temp, mask))
+            plt.title('LIME Explanation')
+            plt.axis('off')
+            
+            # Combined with boundaries
+            plt.subplot(1, 3, 3)
+            plt.imshow(original_image)
+            plt.imshow(mark_boundaries(temp, mask), alpha=0.5)
+            plt.title('LIME Overlay')
+            plt.axis('off')
+            
+            plt.tight_layout()
+            
+            # Save to base64
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', bbox_inches='tight', dpi=150)
+            buffer.seek(0)
+            image_base64 = base64.b64encode(buffer.getvalue()).decode()
+            plt.close()
+            
+            return f"data:image/png;base64,{image_base64}"
+            
+        except Exception as e:
+            print(f"Error creating LIME visualization: {e}")
+            return ""
+    
+    def _extract_lime_importance(self, explanation, class_idx: int) -> Dict[str, float]:
+        """Extract feature importance from LIME explanation"""
+        try:
+            # Get explanation for the specific class
+            local_exp = explanation.local_exp[class_idx]
+            
+            feature_importance = {}
+            for feature_id, importance in local_exp:
+                feature_importance[f"segment_{feature_id}"] = float(importance)
+            
+            return feature_importance
+            
+        except Exception as e:
+            print(f"Error extracting LIME importance: {e}")
+            return {}
     
     def generate_confidence_explanation(self, probabilities: torch.Tensor, class_names: List[str]) -> Dict[str, Any]:
         """

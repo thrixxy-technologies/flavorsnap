@@ -5,6 +5,8 @@ mod types;
 mod admin;
 mod token;
 mod vesting;
+mod staking;
+mod storage;
 mod test;
 
 /// Exports for the contract's types and modules.
@@ -12,6 +14,8 @@ pub use types::*;
 pub use admin::*;
 pub use token::*;
 pub use vesting::*;
+pub use staking::*;
+pub use storage::*;
 
 /// The main contract struct for tokenized incentives.
 #[contract]
@@ -119,6 +123,65 @@ impl TokenizedIncentive {
         vesting::release_vested_funds(env, caller, recipient, schedule_id)
     }
 
+    /// Creates a new staking position.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address creating the stake.
+    /// * `amount` - Amount to stake.
+    /// * `duration` - Staking duration in seconds.
+    /// * `pool_id` - Reward pool ID.
+    /// * `auto_compound` - Whether to auto-compound rewards.
+    ///
+    /// # Returns
+    /// The ID of the created stake.
+    pub fn create_stake(
+        env: Env,
+        staker: Address,
+        amount: u64,
+        duration: u64,
+        pool_id: u32,
+        auto_compound: bool,
+    ) -> u32 {
+        staking::create_stake(env, staker, amount, duration, pool_id, auto_compound)
+    }
+
+    /// Claims rewards from a staking position.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address claiming rewards.
+    /// * `stake_id` - The ID of the stake.
+    ///
+    /// # Returns
+    /// The amount of rewards claimed.
+    pub fn claim_rewards(env: Env, staker: Address, stake_id: u32) -> u64 {
+        staking::claim_rewards(env, staker, stake_id)
+    }
+
+    /// Unstakes tokens from a staking position.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address unstaking.
+    /// * `stake_id` - The ID of the stake.
+    ///
+    /// # Returns
+    /// The total amount returned (principal + rewards).
+    pub fn unstake(env: Env, staker: Address, stake_id: u32) -> u64 {
+        staking::unstake(env, staker, stake_id)
+    }
+
+    /// Compounds rewards for a staking position.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address compounding rewards.
+    /// * `stake_id` - The ID of the stake.
+    pub fn compound_rewards(env: Env, staker: Address, stake_id: u32) {
+        staking::compound_rewards(env, staker, stake_id)
+    }
+
     /// Queries the balance of a given account.
     ///
     /// # Arguments
@@ -153,5 +216,86 @@ impl TokenizedIncentive {
     /// The vesting schedule details.
     pub fn get_vesting_schedule(env: Env, recipient: Address, schedule_id: u32) -> VestingSchedule {
         vesting::get_vesting_schedule(env, recipient, schedule_id)
+    }
+
+    /// Gets stake information.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address of the staker.
+    /// * `stake_id` - The ID of the stake.
+    ///
+    /// # Returns
+    /// The stake details.
+    pub fn get_stake_info(env: Env, staker: Address, stake_id: u32) -> Stake {
+        staking::get_stake_info(env, staker, stake_id)
+    }
+
+    /// Gets all stakes for a user.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address of the staker.
+    ///
+    /// # Returns
+    /// Vector of all stakes for the user.
+    pub fn get_user_all_stakes(env: Env, staker: Address) -> Vec<Stake> {
+        staking::get_user_all_stakes(env, staker)
+    }
+
+    /// Gets pending rewards for a stake.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `staker` - The address of the staker.
+    /// * `stake_id` - The ID of the stake.
+    ///
+    /// # Returns
+    /// The amount of pending rewards.
+    pub fn get_pending_rewards(env: Env, staker: Address, stake_id: u32) -> u64 {
+        staking::get_pending_rewards(env, staker, stake_id)
+    }
+
+    /// Creates a reward pool (admin only).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address of the admin.
+    /// * `pool` - The reward pool configuration.
+    pub fn create_reward_pool(env: Env, caller: Address, pool: RewardPool) {
+        admin::create_reward_pool(env, caller, pool)
+    }
+
+    /// Updates a reward pool (admin only).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address of the admin.
+    /// * `pool_id` - The ID of the pool to update.
+    /// * `pool` - The updated pool configuration.
+    pub fn update_reward_pool(env: Env, caller: Address, pool_id: u32, pool: RewardPool) {
+        admin::update_reward_pool(env, caller, pool_id, pool)
+    }
+
+    /// Gets staking statistics.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// Global staking statistics.
+    pub fn get_staking_stats(env: Env) -> StakingStats {
+        storage::get_staking_stats(&env)
+    }
+
+    /// Gets all reward pools.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// Vector of all reward pools.
+    pub fn get_reward_pools(env: Env) -> Vec<RewardPool> {
+        storage::get_reward_pools(&env)
     }
 }

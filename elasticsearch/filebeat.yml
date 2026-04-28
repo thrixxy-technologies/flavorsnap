@@ -1,0 +1,43 @@
+# Filebeat configuration for FlavorSnap log shipping
+# Runs as a sidecar / DaemonSet and ships container logs to Logstash
+
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    processors:
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+      - decode_json_fields:
+          fields: ["message"]
+          target: ""
+          overwrite_keys: true
+
+  # Also watch application log files written to disk
+  - type: log
+    enabled: true
+    paths:
+      - /app/logs/*.log
+      - /app/logs/**/*.log
+    json.keys_under_root: true
+    json.overwrite_keys: true
+    multiline.pattern: '^\d{4}-\d{2}-\d{2}'
+    multiline.negate: true
+    multiline.match: after
+
+processors:
+  - add_host_metadata: ~
+  - add_cloud_metadata: ~
+
+output.logstash:
+  hosts: ["logstash:5044"]
+  loadbalance: true
+  bulk_max_size: 2048
+
+logging.level: warning
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 7
+  permissions: 0644

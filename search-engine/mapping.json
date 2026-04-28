@@ -1,0 +1,46 @@
+{
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "suggest": {
+            "type": "completion"
+          }
+        }
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "english"
+      },
+      "ingredients": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "category": {
+        "type": "keyword"
+      },
+      "nutritional_info": {
+        "type": "object",
+        "enabled": false
+      },
+      "created_at": {
+        "type": "date"
+      },
+      "language": {
+        "type": "keyword"
+      },
+      "popularity_score": {
+        "type": "rank_feature"
+      }
+    }
+  },
+  "settings": {
+    "index": {
+      "number_of_shards": 3,
+      "number_of_replicas": 1,
+      "refresh_interval": "1s"
+    }
+  }
+}

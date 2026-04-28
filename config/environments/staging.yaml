@@ -1,0 +1,138 @@
+# Staging Environment Configuration
+app:
+  name: "FlavorSnap"
+  version: "2.0.0"
+  environment: "staging"
+  debug: true
+  hot_reload: false
+  log_level: "INFO"
+  
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 2
+  reload: false
+  access_log: true
+  
+database:
+  host: "${DB_HOST}"
+  port: "${DB_PORT:5432}"
+  name: "${DB_NAME}"
+  username: "${DB_USERNAME}"
+  password: "${DB_PASSWORD}"
+  pool_size: 10
+  max_overflow: 15
+  echo: false
+  ssl_mode: "prefer"
+  
+redis:
+  host: "${REDIS_HOST}"
+  port: "${REDIS_PORT:6379}"
+  db: 1
+  password: "${REDIS_PASSWORD}"
+  ssl: true
+  max_connections: 25
+  
+ml:
+  model_path: "/app/models/best_model.pth"
+  classes_path: "/app/data/food_classes.txt"
+  confidence_threshold: 0.75
+  batch_size: 32
+  device: "cpu"
+  model_version: "v2.1"
+  
+upload:
+  max_file_size: 20971520  # 20MB
+  upload_dir: "/app/uploads"
+  allowed_types: ["jpg", "jpeg", "png", "gif", "webp"]
+  temp_dir: "/tmp"
+  cleanup_interval: 3600  # 1 hour
+  
+cache:
+  enabled: true
+  backend: "redis"
+  ttl: 1800  # 30 minutes
+  max_size: 5000
+  
+security:
+  jwt_secret: "${JWT_SECRET}"
+  jwt_expiration: 3600  # 1 hour
+  bcrypt_rounds: 11
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 120
+  cors:
+    enabled: true
+    origins: ["https://staging.flavorsnap.com"]
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    headers: ["Content-Type", "Authorization", "X-API-Key"]
+    
+logging:
+  level: "INFO"
+  format: "json"
+  handlers: ["file", "console"]
+  file_path: "/app/logs/app.log"
+  max_file_size: 20971520  # 20MB
+  backup_count: 7
+  
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  health_check_interval: 20
+  prometheus:
+    enabled: true
+    port: 9091
+  
+features:
+  ml_classification: true
+  blockchain_integration: true
+  analytics: true
+  cache_enabled: true
+  rate_limiting: true
+  hot_reload: false
+  
+external_services:
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-3.5-turbo"
+    max_tokens: 1500
+  aws:
+    access_key: "${AWS_ACCESS_KEY_ID}"
+    secret_key: "${AWS_SECRET_ACCESS_KEY}"
+    region: "${AWS_REGION}"
+    s3_bucket: "flavorsnap-staging"
+  sentry:
+    dsn: "${SENTRY_DSN}"
+    environment: "staging"
+    sample_rate: 1.0
+    
+performance:
+  connection_timeout: 20
+  read_timeout: 45
+  write_timeout: 45
+  max_concurrent_requests: 200
+  
+validation:
+  strict_mode: true
+  auto_fix: true
+  validate_on_load: true
+  
+version_control:
+  enabled: true
+  track_changes: true
+  backup_configs: true
+  max_versions: 25
+  
+security_hardening:
+  https_only: true
+  hsts_enabled: true
+  csrf_protection: true
+  xss_protection: true
+  content_security_policy: true
+  
+backup:
+  enabled: true
+  interval: 43200  # 12 hours
+  retention_days: 14
+  s3_backup: true
+  backup_bucket: "${BACKUP_BUCKET}"

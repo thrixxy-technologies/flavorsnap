@@ -1,85 +1,141 @@
 version: '3.8'
 
 services:
-  # Frontend development service
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend.dev
+      context: ./frontend
+      dockerfile: Dockerfile.dev
     ports:
       - "3000:3000"
-    volumes:
-      - ./frontend:/app/frontend
-      - /app/frontend/node_modules
-      - /app/frontend/.next
-    environment:
-      - NODE_ENV=development
-      - NEXT_PUBLIC_API_URL=http://backend:5000
-      - NEXT_PUBLIC_MODEL_ENDPOINT=/predict
     depends_on:
       - backend
     networks:
       - flavorsnap-network
-    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
 
-  # Backend ML API service
   backend:
     build:
-      context: .
+      context: ./ml-model-api
       dockerfile: Dockerfile.dev
     ports:
       - "5000:5000"
-    volumes:
-      - ./ml-model-api:/app/ml-model-api
-      - ./model.pth:/app/model.pth
-      - ./uploads:/app/uploads
-      - ./logs:/app/logs
-    environment:
-      - FLASK_ENV=development
-      - FLASK_DEBUG=1
-      - PYTHONPATH=/app
     networks:
       - flavorsnap-network
-    restart: unless-stopped
+    environment:
+      - FLASK_ENV=development
+      - MODEL_PATH=/app/model.pth
+    volumes:
+      - ./ml-model-api:/app
+      - ./model.pth:/app/model.pth
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
 
-  # Redis for caching (optional)
-  redis:
-    image: redis:7-alpine
+  # ---------------------------------------------------------------------------
+  # Monitoring stack
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: flavorsnap-prometheus
     ports:
-      - "6379:6379"
+      - "9090:9090"
     volumes:
-      - redis_data:/data
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
     networks:
       - flavorsnap-network
+      - monitoring-network
     restart: unless-stopped
-    command: redis-server --appendonly yes
 
-  # PostgreSQL for data persistence (optional)
-  postgres:
-    image: postgres:15-alpine
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: flavorsnap-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
-      POSTGRES_DB: flavorsnap
-      POSTGRES_USER: flavorsnap
-      POSTGRES_PASSWORD: flavorsnap_dev
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin123}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/flavorsnap_overview.json
+    depends_on:
+      - prometheus
     networks:
-      - flavorsnap-network
+      - monitoring-network
     restart: unless-stopped
 
-volumes:
-  redis_data:
-  postgres_data:
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: flavorsnap-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks:
+      - monitoring-network
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: flavorsnap-node-exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.rootfs=/rootfs"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    networks:
+      - monitoring-network
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: flavorsnap-cadvisor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg
+    networks:
+      - monitoring-network
+    restart: unless-stopped
 
 networks:
   flavorsnap-network:
     driver: bridge
+  monitoring-network:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+

@@ -1,0 +1,46 @@
+# FlavorSnap Staging Configuration
+# Environment: staging
+
+app:
+  debug: true
+  host: "0.0.0.0"
+  port: 5001
+  secret_key: "${APP_SECRET_KEY:staging-secret-key}"
+
+database:
+  pool_size: 15
+  max_overflow: 30
+  pool_timeout: 45
+  pool_recycle: 3600
+
+logging:
+  level: "INFO"
+  enable_console: true
+  max_bytes: 20971520  # 20MB
+  backup_count: 7
+
+security:
+  jwt_expiration_hours: 12
+  bcrypt_rounds: 13
+  rate_limit:
+    requests_per_minute: 80
+    burst_size: 15
+
+monitoring:
+  enable_metrics: true
+  metrics_port: 9091
+  health_check_interval: 30
+  performance_tracking: true
+
+file_storage:
+  max_file_size: 20971520  # 20MB
+  auto_cleanup_days: 5
+
+cache:
+  ttl: 3600
+
+features:
+  enable_hot_reload: true
+  enable_config_validation: true
+  enable_backup: true
+  enable_versioning: true

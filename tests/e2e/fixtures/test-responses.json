@@ -1,0 +1,42 @@
+{
+  "successfulClassification": {
+    "prediction": "Moi Moi",
+    "confidence": 0.91,
+    "predictions": [
+      { "label": "Moi Moi", "confidence": 0.91 },
+      { "label": "Akara", "confidence": 0.06 },
+      { "label": "Bread", "confidence": 0.03 }
+    ],
+    "preprocessing": {
+      "resize": 224,
+      "center_crop": true,
+      "normalize": true,
+      "top_k": 3
+    },
+    "processing_time_ms": 18.247,
+    "filename": "test-food.jpg",
+    "request_id": "test-request-id"
+  },
+  "lowConfidenceClassification": {
+    "prediction": "Yam",
+    "confidence": 0.45,
+    "predictions": [
+      { "label": "Yam", "confidence": 0.45 },
+      { "label": "Bread", "confidence": 0.35 },
+      { "label": "Rice and Stew", "confidence": 0.20 }
+    ],
+    "processing_time_ms": 20.5,
+    "filename": "test-food.jpg"
+  },
+  "apiHealth": {
+    "status": "ok",
+    "model_loaded": true,
+    "classes": ["Akara", "Bread", "Egusi", "Moi Moi", "Rice and Stew", "Yam"],
+    "startup_error": null
+  },
+  "apiError": {
+    "error": "Invalid image format",
+    "code": "INVALID_FILE_TYPE",
+    "message": "Only JPG, PNG, and WebP images are supported"
+  }
+}

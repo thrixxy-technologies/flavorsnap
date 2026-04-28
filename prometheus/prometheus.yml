@@ -1,0 +1,61 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: "production"
+    app: "flavorsnap"
+
+rule_files:
+  - "alert_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # FlavorSnap FastAPI (src/api/main.py)
+  - job_name: "flavorsnap-api"
+    static_configs:
+      - targets: ["flavorsnap-api:8000"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+
+  # FlavorSnap ML Model API (ml-model-api/app.py)
+  - job_name: "flavorsnap-ml-api"
+    static_configs:
+      - targets: ["backend:5000"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+
+  # API Gateway (api-gateway/main.py)
+  - job_name: "flavorsnap-gateway"
+    static_configs:
+      - targets: ["api-gateway:8000"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+
+  # Node Exporter — host system metrics
+  - job_name: "node-exporter"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+    scrape_interval: 30s
+
+  # cAdvisor — container metrics
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    scrape_interval: 30s
+
+  # Redis Exporter
+  - job_name: "redis-exporter"
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+    scrape_interval: 30s
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+    scrape_interval: 60s

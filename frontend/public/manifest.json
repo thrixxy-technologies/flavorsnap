@@ -10,7 +10,12 @@
   "scope": "/",
   "lang": "en",
   "dir": "ltr",
-  "categories": ["food", "health", "lifestyle", "productivity"],
+  "categories": [
+    "food",
+    "health",
+    "lifestyle",
+    "productivity"
+  ],
   "icons": [
     {
       "src": "/icons/icon-72x72.png",
@@ -95,5 +100,10 @@
   "prefer_related_applications": false,
   "edge_side_panel": {
     "preferred_width": 400
-  }
+  },
+  "gcm_sender_id": "103953800507",
+  "permissions": [
+    "notifications",
+    "push"
+  ]
 }

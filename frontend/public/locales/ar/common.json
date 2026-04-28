@@ -17,5 +17,15 @@
   "language_yo": "Yorùbá",
   "error_classify_retry": "فشل تصنيف الصورة. يرجى المحاولة مرة أخرى.",
   "classify_food": "تصنيف الطعام",
-  "classification_result": "نتيجة التصنيف"
+  "classification_result": "نتيجة التصنيف",
+  "shortcut_hint": "اضغط 'O' لفتح الكاميرا، و 'C' للتصنيف، و 'R' لإعادة الضبط",
+  "clear_image": "مسح الصورة",
+  "reset": "إعادة تعيين",
+  "history": "السجل",
+  "export_json": "Export JSON",
+  "export_csv": "Export CSV",
+  "clear_history": "مسح السجل",
+  "no_history_yet": "ستظهر أطعمتك المصنفة هنا.",
+  "confirm_clear_history": "هل أنت متأكد من مسح تاريخ التصنيف الخاص بك؟"
+  "reset": "إعادة تعيين"
 }

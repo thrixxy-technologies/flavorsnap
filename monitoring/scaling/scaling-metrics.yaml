@@ -1,0 +1,441 @@
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: autoscaler-metrics
+  namespace: flavorsnap
+  labels:
+    app: autoscaler
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: autoscaler
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: hpa-metrics
+  namespace: flavorsnap
+  labels:
+    app: hpa
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: hpa
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: vpa-metrics
+  namespace: flavorsnap
+  labels:
+    app: vpa
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: vpa
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: autoscaling-alerts
+  namespace: flavorsnap
+  labels:
+    app: autoscaler
+    component: alerting
+spec:
+  groups:
+  - name: autoscaling.rules
+    rules:
+    # HPA Scaling Alerts
+    - alert: HPAHighCPUUtilization
+      expr: kube_hpa_status_current_replicas > kube_hpa_spec_max_replicas * 0.8
+      for: 5m
+      labels:
+        severity: warning
+        component: hpa
+      annotations:
+        summary: "HPA approaching max replicas"
+        description: "HPA {{ $labels.hpa }} is at {{ $value }} replicas (80% of max {{ $labels.max_replicas }})"
+    
+    - alert: HPAScaleUpFrequent
+      expr: increase(kube_hpa_status_current_replicas[15m]) > 2
+      for: 10m
+      labels:
+        severity: warning
+        component: hpa
+      annotations:
+        summary: "HPA scaling up frequently"
+        description: "HPA {{ $labels.hpa }} has scaled up {{ $value }} times in the last 15 minutes"
+    
+    - alert: HPAScaleDownFrequent
+      expr: decrease(kube_hpa_status_current_replicas[15m]) > 2
+      for: 10m
+      labels:
+        severity: info
+        component: hpa
+      annotations:
+        summary: "HPA scaling down frequently"
+        description: "HPA {{ $labels.hpa }} has scaled down {{ $value }} times in the last 15 minutes"
+    
+    # Cost Optimization Alerts
+    - alert: HighClusterCost
+      expr: cluster_cost_per_hour > 50
+      for: 15m
+      labels:
+        severity: warning
+        component: cost
+      annotations:
+        summary: "Cluster cost is high"
+        description: "Current cluster cost is ${{ $value }}/hour (threshold: $50/hour)"
+    
+    - alert: CostOptimizationOpportunity
+      expr: cost_savings_potential > 10
+      for: 30m
+      labels:
+        severity: info
+        component: cost
+      annotations:
+        summary: "Cost optimization opportunity detected"
+        description: "Potential cost savings of ${{ $value }}/hour through optimization"
+    
+    # Performance Alerts
+    - alert: ScalingLatencyHigh
+      expr: autoscaler_scaling_latency_seconds{quantile="0.95"} > 60
+      for: 5m
+      labels:
+        severity: warning
+        component: performance
+      annotations:
+        summary: "High scaling latency"
+        description: "95th percentile scaling latency is {{ $value }}s (threshold: 60s)"
+    
+    - alert: PredictionAccuracyLow
+      expr: autoscaler_prediction_accuracy < 0.7
+      for: 15m
+      labels:
+        severity: warning
+        component: prediction
+      annotations:
+        summary: "Low prediction accuracy"
+        description: "Prediction accuracy is {{ $value }} (threshold: 70%)"
+    
+    # Resource Utilization Alerts
+    - alert: PodResourceWaste
+      expr: kube_pod_container_resource_requests{resource="cpu"} / kube_node_status_allocatable_cpu * 100 > 80
+      for: 20m
+      labels:
+        severity: warning
+        component: resource
+      annotations:
+        summary: "High CPU resource waste"
+        description: "CPU resource requests are {{ $value }}% of allocatable (threshold: 80%)"
+    
+    - alert: MemoryResourceWaste
+      expr: kube_pod_container_resource_requests{resource="memory"} / kube_node_status_allocatable_memory_bytes * 100 > 80
+      for: 20m
+      labels:
+        severity: warning
+        component: resource
+      annotations:
+        summary: "High memory resource waste"
+        description: "Memory resource requests are {{ $value }}% of allocatable (threshold: 80%)"
+    
+    # Scaling Event Alerts
+    - alert: ScalingEventError
+      expr: autoscaler_scaling_events_total{status="error"} > 0
+      for: 1m
+      labels:
+        severity: critical
+        component: scaling
+      annotations:
+        summary: "Scaling event error"
+        description: "{{ $value }} scaling errors in the last minute"
+    
+    - alert: NoScalingEvents
+      expr: increase(autoscaler_scaling_events_total[1h]) == 0
+      for: 2h
+      labels:
+        severity: info
+        component: scaling
+      annotations:
+        summary: "No scaling events detected"
+        description: "No scaling events in the last 2 hours - system may be inactive"
+
+  - name: cost-optimization.rules
+    rules:
+    # Cost Analysis Metrics
+    - record: cluster_cost_per_hour
+      expr: sum(kube_pod_container_resource_requests{resource="cpu"} * 0.05) + sum(kube_pod_container_resource_requests{resource="memory"} / 1024/1024/1024 * 0.01)
+    
+    - record: cost_savings_potential
+      expr: (cluster_cost_per_hour * 0.3)  # Potential 30% savings
+    
+    - record: cost_per_request
+      expr: cluster_cost_per_hour / sum(rate(http_requests_total[5m]))
+    
+    - record: cost_efficiency_score
+      expr: (sum(rate(http_requests_total[5m])) / cluster_cost_per_hour) * 100
+
+  - name: performance-optimization.rules
+    rules:
+    # Performance Metrics
+    - record: scaling_response_time_p95
+      expr: histogram_quantile(0.95, rate(autoscaler_scaling_latency_seconds_bucket[5m]))
+    
+    - record: resource_utilization_score
+      expr: (avg(kube_pod_container_resource_usage{resource="cpu"} / kube_pod_container_resource_requests{resource="cpu"}) * 100)
+    
+    - record: scaling_efficiency
+      expr: (increase(kube_hpa_status_current_replicas[1h]) / increase(autoscaler_scaling_events_total{direction="scale_up"}[1h])) * 100
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scaling-dashboard-config
+  namespace: flavorsnap
+  labels:
+    app: autoscaler
+    component: dashboard
+data:
+  dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Intelligent Auto-Scaling Dashboard",
+        "tags": ["autoscaling", "kubernetes", "flavorsnap"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Current Replicas",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "kube_hpa_status_current_replicas",
+                "legendFormat": "{{ $labels.hpa }}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "unit": "short"
+              }
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "Resource Utilization",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "kube_pod_container_resource_usage{resource=\"cpu\"} / kube_pod_container_resource_requests{resource=\"cpu\"} * 100",
+                "legendFormat": "CPU Usage %"
+              },
+              {
+                "expr": "kube_pod_container_resource_usage{resource=\"memory\"} / kube_pod_container_resource_requests{resource=\"memory\"} * 100",
+                "legendFormat": "Memory Usage %"
+              }
+            ],
+            "yAxes": [
+              {
+                "unit": "percent",
+                "max": 100,
+                "min": 0
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "Scaling Events",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "increase(autoscaler_scaling_events_total[5m])",
+                "legendFormat": "{{ $labels.direction }}"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 4,
+            "title": "Cluster Cost",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "cluster_cost_per_hour",
+                "legendFormat": "Cost/Hour"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "currencyUSD"
+              }
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 12,
+              "y": 8
+            }
+          },
+          {
+            "id": 5,
+            "title": "Cost Efficiency",
+            "type": "gauge",
+            "targets": [
+              {
+                "expr": "cost_efficiency_score",
+                "legendFormat": "Efficiency Score"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "max": 100,
+                "min": 0,
+                "thresholds": {
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 50
+                    },
+                    {
+                      "color": "green",
+                      "value": 80
+                    }
+                  ]
+                }
+              }
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 18,
+              "y": 8
+            }
+          },
+          {
+            "id": 6,
+            "title": "Prediction Accuracy",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "autoscaler_prediction_accuracy",
+                "legendFormat": "Accuracy"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "max": 100,
+                "min": 0
+              }
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 0,
+              "y": 16
+            }
+          },
+          {
+            "id": 7,
+            "title": "Scaling Latency",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "autoscaler_scaling_latency_seconds{quantile=\"0.95\"}",
+                "legendFormat": "95th Percentile"
+              },
+              {
+                "expr": "autoscaler_scaling_latency_seconds{quantile=\"0.50\"}",
+                "legendFormat": "50th Percentile"
+              }
+            ],
+            "yAxes": [
+              {
+                "unit": "s"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 6,
+              "y": 16
+            }
+          },
+          {
+            "id": 8,
+            "title": "Cost Savings Potential",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "cost_savings_potential",
+                "legendFormat": "Savings/Hour"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "currencyUSD"
+              }
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 18,
+              "y": 16
+            }
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }

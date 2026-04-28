@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # Frontend development service
+  frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: flavorsnap-frontend-dev
+    restart: "no"
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
+      - NEXT_PUBLIC_MODEL_ENDPOINT=/predict
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - flavorsnap-dev-network
+    command: npm run dev
+
+  # Backend development service
+  backend-dev:
+    build:
+      context: ./ml-model-api
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: flavorsnap-backend-dev
+    restart: "no"
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_APP=app.py
+      - FLASK_DEBUG=1
+      - PYTHONPATH=/app
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - MODEL_PATH=/app/model.pth
+      - UPLOAD_FOLDER=/app/uploads
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./ml-model-api:/app
+      - ./model.pth:/app/model.pth
+      - ./ml-model-api/uploads:/app/uploads
+    networks:
+      - flavorsnap-dev-network
+    command: python app.py
+
+networks:
+  flavorsnap-dev-network:
+    driver: bridge

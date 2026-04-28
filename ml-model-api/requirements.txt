@@ -1,69 +1,15 @@
-
-# Core ML/AI Dependencies
-torch>=1.12.0
-torchvision>=0.13.0
-numpy>=1.21.0
-pillow>=9.0.0
-
-# Web Framework
-flask>=2.2.0
-flask-cors>=4.0.0
-requests>=2.28.0
-
-# Data Processing
-pandas>=1.4.0
-scikit-learn>=1.1.0
-
-# Database (Optional)
-psycopg2-binary>=2.9.0  # PostgreSQL
-redis>=4.3.0            # Redis caching
-
-# Image Processing
-opencv-python>=4.6.0
-imageio>=2.19.0
-
-# Utilities
-python-dotenv>=0.19.0
+flask>=2.3.0
+pillow>=10.0.0
+torch>=2.0.0
+torchvision>=0.15.0
 pyyaml>=6.0
-tqdm>=4.64.0
-
-# Development & Testing
-pytest>=7.0.0
-pytest-cov>=3.0.0
-black>=22.0.0
-flake8>=5.0.0
-
-# Platform-specific dependencies
-# Windows
-# ; pywin32>=227  # Uncomment for Windows-specific features
-
-# macOS
-# ; pyobjc-framework-Cocoa>=8.0  # Uncomment for macOS-specific features
-
-# Linux
-# ; python3-dev  # System package, not pip installable
-
-# GPU Support (Optional - uncomment based on your GPU)
-# NVIDIA CUDA
-# ; torch --index-url https://download.pytorch.org/whl/cu118
-# ; torchvision --index-url https://download.pytorch.org/whl/cu118
-
-# AMD ROCm
-# ; torch --index-url https://download.pytorch.org/whl/rocm5.4.2
-# ; torchvision --index-url https://download.pytorch.org/whl/rocm5.4.2
-
-# Production Dependencies
-gunicorn>=20.1.0
-gevent>=22.8.0
-
-# Monitoring & Logging
-prometheus-client>=0.14.0
-structlog>=22.1.0
-
-# Security
-cryptography>=37.0.0
-bcrypt>=3.2.0
-
-# Performance Optimization
-ujson>=5.6.0
-orjson>=3.8.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+watchdog>=3.0.0
+cryptography>=41.0.0
+python-dotenv>=1.0.0
+redis>=4.5.0
+celery>=5.3.0
+kombu>=5.3.0
+prometheus-client>=0.16.0
+statsd>=3.3.0

@@ -1,0 +1,54 @@
+# FlavorSnap Robots.txt
+# Generated on 2024-01-01
+# https://flavorsnap.com
+
+User-agent: *
+Allow: /
+Allow: /images/
+Allow: /api/
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /manifest.json
+
+# Block AI crawlers from training data
+User-agent: GPTBot
+Disallow: /
+User-agent: ChatGPT-User
+Disallow: /
+User-agent: CCBot
+Disallow: /
+User-agent: anthropic-ai
+Disallow: /
+User-agent: Claude-Web
+Disallow: /
+User-agent: Google-Extended
+Disallow: /
+User-agent: PerplexityBot
+Disallow: /
+
+# Block common bot paths
+Disallow: /admin/
+Disallow: /api/admin/
+Disallow: /_next/
+Disallow: /static/
+Disallow: /.well-known/
+Disallow: /temp/
+Disallow: /cache/
+Disallow: /logs/
+Disallow: /private/
+Disallow: /*.json$
+Disallow: /api/*?*
+
+# Allow specific important paths
+Allow: /sitemap.xml
+Allow: /robots.txt
+Allow: /sitemap
+
+# Crawl delay (optional)
+Crawl-delay: 1
+
+# Host directive (for Yandex)
+Host: https://flavorsnap.com
+
+# Sitemap location
+Sitemap: https://flavorsnap.com/sitemap.xml

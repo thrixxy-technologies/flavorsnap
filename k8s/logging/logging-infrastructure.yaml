@@ -1,0 +1,1178 @@
+# Logging Infrastructure for FlavorSnap
+# Comprehensive logging system with structured logs, aggregation, and analysis
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flavorsnap-logging
+  labels:
+    name: flavorsnap-logging
+    component: logging
+
+---
+# ConfigMap for logging configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logging-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: config
+data:
+  logging.yaml: |
+    # Logging Configuration
+    version: "1.0"
+    
+    # Log levels
+    levels:
+      root: INFO
+      app: INFO
+      api: INFO
+      ml: INFO
+      security: INFO
+      performance: INFO
+      audit: INFO
+      uvicorn: INFO
+      sqlalchemy: WARNING
+    
+    # Log outputs
+    outputs:
+      console:
+        enabled: true
+        format: colored
+        level: INFO
+      file:
+        enabled: true
+        format: structured
+        directory: /app/logs
+        rotation:
+          max_size_mb: 100
+          backup_count: 5
+        compression: true
+      elasticsearch:
+        enabled: true
+        hosts:
+          - elasticsearch.logging.svc.cluster.local:9200
+        index_pattern: flavorsnap-logs-%Y.%m.%d
+        template_name: flavorsnap-logs
+        bulk_size: 1000
+        flush_interval: 30
+      loki:
+        enabled: true
+        url: http://loki.logging.svc.cluster.local:3100/loki/api/v1/push
+        labels:
+          app: flavorsnap
+          environment: production
+    
+    # Log aggregation
+    aggregation:
+      enabled: true
+      interval_seconds: 60
+      batch_size: 1000
+      max_workers: 4
+    
+    # Log analysis
+    analysis:
+      enabled: true
+      interval_minutes: 5
+      patterns:
+        error_detection: true
+        performance_analysis: true
+        security_monitoring: true
+        anomaly_detection: true
+      thresholds:
+        error_rate: 5.0
+        response_time_ms: 2000.0
+        cpu_usage: 80.0
+        memory_usage: 85.0
+    
+    # Alerting
+    alerting:
+      enabled: true
+      channels:
+        email:
+          enabled: true
+          smtp_server: smtp.gmail.com
+          smtp_port: 587
+          username: alerts@flavorsnap.com
+          recipients:
+            - admin@flavorsnap.com
+            - devops@flavorsnap.com
+        slack:
+          enabled: true
+          webhook_url: https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+          channel: "#alerts"
+        discord:
+          enabled: true
+          webhook_url: https://discord.com/api/webhooks/YOUR/DISCORD/WEBHOOK
+      thresholds:
+        critical:
+          error_rate: 10.0
+          response_time_ms: 5000.0
+          cpu_usage: 95.0
+          memory_usage: 95.0
+        warning:
+          error_rate: 5.0
+          response_time_ms: 2000.0
+          cpu_usage: 80.0
+          memory_usage: 85.0
+    
+    # Compliance
+    compliance:
+      enabled: true
+      standards:
+        - GDPR
+        - HIPAA
+        - PCI_DSS
+      assessment_frequency: daily
+      report_retention_days: 2555
+      evidence_retention_days: 1825
+    
+    # Performance monitoring
+    performance:
+      enabled: true
+      metrics_interval_seconds: 30
+      collection_interval_seconds: 10
+      storage_retention_days: 30
+      thresholds:
+        throughput_min: 100.0
+        processing_time_max_ms: 1000.0
+        error_rate_max: 5.0
+        memory_usage_max: 80.0
+        cpu_usage_max: 85.0
+
+---
+# PVC for log storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logs-storage-pvc
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+
+---
+# Elasticsearch for log storage and indexing
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: elasticsearch
+spec:
+  serviceName: elasticsearch
+  replicas: 3
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: elasticsearch
+    spec:
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+        ports:
+        - containerPort: 9200
+          name: http
+        - containerPort: 9300
+          name: transport
+        env:
+        - name: discovery.type
+          value: single-node
+        - name: ES_JAVA_OPTS
+          value: "-Xms1g -Xmx1g"
+        - name: xpack.security.enabled
+          value: "false"
+        - name: xpack.monitoring.enabled
+          value: "false"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "3Gi"
+            cpu: "2000m"
+        volumeMounts:
+        - name: elasticsearch-data
+          mountPath: /usr/share/elasticsearch/data
+        - name: elasticsearch-logs
+          mountPath: /usr/share/elasticsearch/logs
+      volumes:
+      - name: elasticsearch-data
+        persistentVolumeClaim:
+          claimName: logs-storage-pvc
+      - name: elasticsearch-logs
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: elasticsearch-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 50Gi
+      storageClassName: standard
+
+---
+# Elasticsearch Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: elasticsearch
+spec:
+  selector:
+    app: flavorsnap-logging
+    component: elasticsearch
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+  - name: transport
+    port: 9300
+    targetPort: 9300
+  type: ClusterIP
+
+---
+# Logstash for log processing and transformation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: logstash
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: logstash
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: logstash
+    spec:
+      containers:
+      - name: logstash
+        image: docker.elastic.co/logstash/logstash:8.11.0
+        ports:
+        - containerPort: 5044
+          name: beats
+        - containerPort: 9600
+          name: api
+        env:
+        - name: LS_JAVA_OPTS
+          value: "-Xmx1g -Xms1g"
+        - name: ELASTICSEARCH_HOSTS
+          value: "elasticsearch:9200"
+        - name: ELASTICSEARCH_USER
+          value: ""
+        - name: ELASTICSEARCH_PASSWORD
+          value: ""
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: logstash-config
+          mountPath: /usr/share/logstash/pipeline
+        - name: logstash-logs
+          mountPath: /usr/share/logstash/logs
+      volumes:
+      - name: logstash-config
+        configMap:
+          name: logstash-config
+      - name: logstash-logs
+        emptyDir: {}
+
+---
+# Logstash ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: logstash
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    http.port: 9600
+    path.config: /usr/share/logstash/pipeline
+    pipeline.workers: 2
+    pipeline.batch.size: 125
+    pipeline.batch.delay: 50
+    
+  pipeline.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+      tcp {
+        port => 5000
+        codec => json
+      }
+      udp {
+        port => 5001
+        codec => json
+      }
+    }
+    
+    filter {
+      # Parse structured logs
+      if [message] {
+        json {
+          source => "message"
+          target => "parsed"
+        }
+      }
+      
+      # Add timestamp
+      if ![timestamp] {
+        mutate {
+          add => { "timestamp" => "%{+yyyy-MM-dd'T'HH:mm:ss.SSSZ}" }
+        }
+      }
+      
+      # Add environment
+      mutate {
+        add => { 
+          "environment" => "production",
+          "cluster" => "flavorsnap"
+        }
+      }
+      
+      # Extract log level
+      if [level] {
+        mutate {
+          add => { "log_level" => "%{[level]}" }
+        }
+      }
+      
+      # Parse security events
+      if [parsed][security_event] {
+        mutate {
+          add => { 
+            "event_type" => "security",
+            "severity" => "%{[parsed][security_event][severity]}"
+          }
+        }
+      }
+      
+      # Parse performance events
+      if [parsed][performance_event] {
+        mutate {
+          add => { 
+            "event_type" => "performance",
+            "response_time" => "%{[parsed][performance_event][response_time]}"
+          }
+        }
+      }
+    }
+    
+    output {
+      elasticsearch {
+        hosts => ["elasticsearch:9200"]
+        index => "flavorsnap-logs-%{+yyyy.MM.dd}"
+        template_name => "flavorsnap-logs"
+        template_pattern => "flavorsnap-logs-*"
+        template => {
+          "index_patterns" => ["flavorsnap-logs-*"],
+          "settings" => {
+            "number_of_shards" => 1,
+            "number_of_replicas" => 1,
+            "index.refresh_interval" => "5s"
+          },
+          "mappings" => {
+            "properties" => {
+              "@timestamp" => { "type" => "date" },
+              "level" => { "type" => "keyword" },
+              "logger" => { "type" => "keyword" },
+              "message" => { "type" => "text" },
+              "source" => { "type" => "keyword" },
+              "event_type" => { "type" => "keyword" },
+              "severity" => { "type" => "keyword" },
+              "user_id" => { "type" => "keyword" },
+              "ip_address" => { "type" => "ip" },
+              "module" => { "type" => "keyword" },
+              "function" => { "type" => "keyword" }
+            }
+          }
+        }
+      }
+    }
+    
+  log4j2.properties: |
+    logger.logstash=DEBUG, console, file:/usr/share/logstash/logs/logstash.log
+    appender.console.type=Console
+    appender.console.layout=org.apache.logging.log4j.PatternLayout
+    appender.console.layout.ConversionPattern=%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1.}:%L - %m%n
+
+---
+# Logstash Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: logstash
+spec:
+  selector:
+    app: flavorsnap-logging
+    component: logstash
+  ports:
+  - name: beats
+    port: 5044
+    targetPort: 5044
+    protocol: TCP
+  - name: tcp
+    port: 5000
+    targetPort: 5000
+    protocol: TCP
+  - name: udp
+    port: 5001
+    targetPort: 5001
+    protocol: UDP
+  - name: api
+    port: 9600
+    targetPort: 9600
+    protocol: TCP
+  type: ClusterIP
+
+---
+# Kibana for log visualization
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: kibana
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: docker.elastic.co/kibana/kibana:8.11.0
+        ports:
+        - containerPort: 5601
+          name: http
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "elasticsearch:9200"
+        - name: SERVER_NAME
+          value: "kibana.logging.svc.cluster.local"
+        - name: SERVER_HOST
+          value: "0.0.0.0"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: kibana-config
+          mountPath: /usr/share/kibana/config
+      volumes:
+      - name: kibana-config
+        configMap:
+          name: kibana-config
+
+---
+# Kibana ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kibana-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: kibana
+data:
+  kibana.yml: |
+    server.name: kibana
+    server.host: "0.0.0.0"
+    server.port: 5601
+    elasticsearch.hosts: ["http://elasticsearch:9200"]
+    elasticsearch.username: ""
+    elasticsearch.password: ""
+    logging.dest: stdout
+    logging.quiet: true
+    logging.verbose: true
+    monitoring.ui.container.elasticsearch.enabled: true
+    xpack.security.enabled: false
+    xpack.monitoring.enabled: false
+    xpack.reporting.enabled: false
+    xpack.apm.enabled: false
+
+---
+# Kibana Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: kibana
+spec:
+  selector:
+    app: flavorsnap-logging
+    component: kibana
+  ports:
+  - name: http
+    port: 80
+    targetPort: 5601
+    type: ClusterIP
+
+---
+# Filebeat for log collection
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: filebeat
+spec:
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: filebeat
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: filebeat
+    spec:
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: filebeat
+        image: docker.elastic.co/beats/filebeat:8.11.0
+        args:
+        - -c
+        - /etc/filebeat.yml
+        - -e
+        env:
+        - name: ELASTICSEARCH_HOST
+          value: elasticsearch.logging.svc.cluster.local
+        - name: ELASTICSEARCH_PORT
+          value: "9200"
+        - name: LOGSTASH_HOST
+          value: logstash.logging.svc.cluster.local
+        - name: LOGSTASH_PORT
+          value: "5044"
+        securityContext:
+          runAsUser: 0
+        resources:
+          requests:
+            memory: "200Mi"
+            cpu: "100m"
+          limits:
+            memory: "400Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: filebeat-config
+          mountPath: /etc/filebeat
+        - name: data
+          mountPath: /usr/share/filebeat/data
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: filebeat-config
+        configMap:
+          defaultMode: 0600
+          name: filebeat-config
+      - name: data
+        hostPath:
+          path: /var/lib/filebeat-data
+          type: DirectoryOrCreate
+
+---
+# Filebeat ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: filebeat
+data:
+  filebeat.yml: |
+    filebeat.inputs:
+    - type: container
+      paths:
+        - '/var/log/containers/*.log'
+        - '/var/log/containers/*.json'
+      processors:
+        - add_kubernetes_metadata:
+            host: ${NODE_NAME}
+            matchers:
+            - logs_path:
+                logs_path: "/var/log/containers/"
+        - decode_json_fields:
+            fields: ["message"]
+            target: ""
+            overwrite_keys: true
+        - add_docker_metadata:
+            host: "unix:///var/run/docker.sock"
+        - add_host_metadata:
+        - add_cloud_metadata: ~
+        - add_process_metadata: ~
+        - add_locale: ~
+        - add_labels:
+            target: "kubernetes.labels"
+            labels:
+              app: flavorsnap
+              component: logging
+    
+    output.logstash:
+      hosts: ["logstash:5044"]
+      compression_level: 3
+      escape_html: false
+      template.name: "filebeat"
+      template.pattern: "filebeat-*"
+      template.settings:
+        index.number_of_shards: 1
+        index.codec: "best_compression"
+    
+    logging.level: info
+    logging.to_files: true
+    logging.files:
+      path: /var/log/filebeat
+      name: filebeat
+      keepfiles: 7
+      permissions: 0644
+      rotateeverybytes: 10485760 # 10MB
+
+---
+# Fluentd for log collection (alternative to Filebeat)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: fluentd
+spec:
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: fluentd
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: fluentd
+    spec:
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1.16-debian-elasticsearch7-1
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: elasticsearch.logging.svc.cluster.local
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: "9200"
+        - name: FLUENT_ELASTICSEARCH_SCHEME
+          value: http
+        resources:
+          requests:
+            memory: "200Mi"
+            cpu: "100m"
+          limits:
+            memory: "500Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluentd-config
+          mountPath: /fluentd/etc
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluentd-config
+        configMap:
+          name: fluentd-config
+
+---
+# Fluentd ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: fluentd
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      format json
+      time_format %Y-%m-%dT%H:%M:%S.%NZ
+      time_key time
+      keep_time_key true
+      skip_newline_on_flush true
+      read_from_head true
+    </source>
+    
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+    </filter>
+    
+    <filter kubernetes.**>
+      @type record_transformer
+      <record>
+        hostname ${hostname}
+        environment production
+        cluster flavorsnap
+      </record>
+    </filter>
+    
+    <match kubernetes.**>
+      @type elasticsearch
+      host elasticsearch.logging.svc.cluster.local
+      port 9200
+      index_name flavorsnap-logs
+      type_name _doc
+      include_tag_key true
+      tag_key @tag
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+        chunk_limit_size 2M
+        queue_limit_length 8
+        overflow_action block
+      </buffer>
+    </match>
+
+---
+# Loki for log aggregation (alternative to Elasticsearch)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: loki
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: loki
+    spec:
+      containers:
+      - name: loki
+        image: grafana/loki:2.9.0
+        ports:
+        - containerPort: 3100
+          name: http
+        args:
+        - -config.file=/etc/loki/local-config.yaml
+        env:
+        - name: GOMAXPROCS
+          value: "4"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        volumeMounts:
+        - name: loki-storage
+          mountPath: /loki
+        - name: loki-config
+          mountPath: /etc/loki
+      volumes:
+      - name: loki-storage
+        persistentVolumeClaim:
+          claimName: logs-storage-pvc
+      - name: loki-config
+        configMap:
+          name: loki-config
+
+---
+# Loki ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: loki
+data:
+  local-config.yaml: |
+    auth_enabled: false
+    
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9096
+      
+    ingester:
+      lifecycler:
+        address: 127.0.0.1
+        ring:
+          kvstore:
+            store: inmemory
+            replication_factor: 1
+        max_transfer_retries: 0
+        heartbeat_timeout: 1m
+        heartbeat_period: 5s
+        heartbeat_timeout_jitter: 0.1s
+        final_sleep: 0s
+        chunk_idle_period: 1h
+        chunk_retain_period: 30s
+        chunk_gc_period: 1h
+        wal:
+          dir: /loki/wal
+          truncate_frequency: 1h
+          min_age: 24h
+          max_age: 336h
+          sync_write: false
+          checkpoint_frequency: 5s
+          
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v11
+          index:
+            prefix: index_
+            period: 24h
+            
+    limits_config:
+      enforce_metric_name: false
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      
+    chunk_store_config:
+      max_look_back_period: 0s
+      query_look_back_period: 0s
+      
+    table_manager:
+      retention_deletes_enabled: false
+      retention_period: 0s
+      
+    querier:
+      max_concurrent: 10
+      engine:
+        max_look_back_period: 0s
+        
+    query_scheduler:
+      max_outstanding_requests_per_tenant: 2048
+      
+    frontend:
+      compress_responses: true
+      log_level: info
+      max_outstanding_per_tenant: 2048
+      
+    ingester_client:
+        pool_config:
+          max_idle_connections: 100
+          max_idle_connections_per_host: 100
+          max_connection_age: 0s
+          grpc_connection_config:
+            max_recv_msg_size: 1048576 # 1MB
+            grpc_compression: gzip
+            rate_limit: 0
+            rate_limit_burst: 0
+            backoff_on_ratelimit: false
+            backoff_config:
+              min_period: 100ms
+              max_period: 10s
+              jitter: 0.2
+
+---
+# Loki Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: loki
+spec:
+  selector:
+    app: flavorsnap-logging
+    component: loki
+  ports:
+  - name: http
+    port: 3100
+    targetPort: 3100
+    type: ClusterIP
+
+---
+# Grafana for log visualization
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flavorsnap-logging
+      component: grafana
+  template:
+    metadata:
+      labels:
+        app: flavorsnap-logging
+        component: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:10.2.0
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: GF_SECURITY_ADMIN_USER
+          value: admin
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-password
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-clock-panel,grafana-simple-json-datasource"
+        - name: GF_SERVER_DOMAIN
+          value: grafana.logging.svc.cluster.local
+        - name: GF_SERVER_ROOT_URL
+          value: http://grafana.logging.svc.cluster.local
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        - name: grafana-config
+          mountPath: /etc/grafana
+      volumes:
+      - name: grafana-storage
+        persistentVolumeClaim:
+          claimName: logs-storage-pvc
+      - name: grafana-config
+        configMap:
+          name: grafana-config
+
+---
+# Grafana ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: grafana
+data:
+  grafana.ini: |
+    [server]
+    http_port = 3000
+    domain = grafana.logging.svc.cluster.local
+    root_url = http://grafana.logging.svc.cluster.local
+    
+    [database]
+    type = sqlite3
+    path = /var/lib/grafana/grafana.db
+    host = localhost:3306
+    name = grafana
+    user = root
+    password = 
+    
+    [security]
+    admin_user = admin
+    admin_password = admin
+    
+    [users]
+    allow_sign_up = false
+    
+    [auth.anonymous]
+    enabled = false
+    
+    [log]
+    mode = console
+    level = info
+    
+    [paths]
+    data = /var/lib/grafana
+    logs = /var/log/grafana
+    plugins = /var/lib/grafana/plugins
+    provisioning = /etc/grafana/provisioning
+
+---
+# Grafana Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: grafana
+spec:
+  selector:
+    app: flavorsnap-logging
+    component: grafana
+  ports:
+  - name: http
+    port: 80
+    targetPort: 3000
+    type: ClusterIP
+
+---
+# Grafana admin secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-admin
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: grafana
+type: Opaque
+data:
+  admin-password: YWRtaW5wYWRtaW4=  # base64 encoded 'adminadmin'
+
+---
+# NetworkPolicy for logging namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logging-netpol
+  namespace: flavorsnap-logging
+  labels:
+    app: flavorsnap-logging
+    component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: flavorsnap-logging
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: flavorsnap
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 9200
+    - protocol: TCP
+      port: 5601
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: flavorsnap
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 53
+      port: 443
+    - protocol: UDP
+      port: 53

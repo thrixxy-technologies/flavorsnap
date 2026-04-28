@@ -1,0 +1,470 @@
+name: Enhanced Security Scanning and Remediation
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  schedule:
+    # Run comprehensive security scans daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of scan to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - dependencies
+          - code
+          - container
+          - compliance
+      fail_on_high:
+        description: 'Fail workflow on high severity findings'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  SECURITY_REPORT_PATH: security-reports
+  REMEDIATION_PATH: remediation-scripts
+
+jobs:
+  setup-security-scan:
+    runs-on: ubuntu-latest
+    name: Setup Security Scan Environment
+    outputs:
+      scan-matrix: ${{ steps.set-matrix.outputs.matrix }}
+      should-fail: ${{ steps.check-fail.outputs.should-fail }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit semgrep requests pyyaml
+        pip install -r requirements-dev.txt || true
+        
+    - name: Install system tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl wget gnupg
+        # Install Trivy
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+        
+    - name: Set scan matrix
+      id: set-matrix
+      run: |
+        if [ "${{ github.event.inputs.scan_type }}" = "dependencies" ]; then
+          echo 'matrix=["dependencies"]' >> $GITHUB_OUTPUT
+        elif [ "${{ github.event.inputs.scan_type }}" = "code" ]; then
+          echo 'matrix=["code"]' >> $GITHUB_OUTPUT
+        elif [ "${{ github.event.inputs.scan_type }}" = "container" ]; then
+          echo 'matrix=["container"]' >> $GITHUB_OUTPUT
+        elif [ "${{ github.event.inputs.scan_type }}" = "compliance" ]; then
+          echo 'matrix=["compliance"]' >> $GITHUB_OUTPUT
+        else
+          echo 'matrix=["dependencies","code","container","compliance"]' >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Check fail condition
+      id: check-fail
+      run: |
+        if [ "${{ github.event.inputs.fail_on_high }}" = "false" ]; then
+          echo "should-fail=false" >> $GITHUB_OUTPUT
+        else
+          echo "should-fail=true" >> $GITHUB_OUTPUT
+        fi
+
+  dependency-vulnerability-scan:
+    runs-on: ubuntu-latest
+    name: Dependency Vulnerability Scan
+    needs: setup-security-scan
+    if: contains(needs.setup-security-scan.outputs.scan-matrix, 'dependencies')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+        
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety
+        cargo install cargo-audit
+        npm install -g audit-ci
+        
+    - name: Run Python dependency scan
+      run: |
+        python scripts/security/vulnerability_scanner.py --dependencies --output ${{ env.SECURITY_REPORT_PATH }}/python-dependencies.json
+        
+    - name: Run Rust dependency scan
+      run: |
+        cargo audit --json > ${{ env.SECURITY_REPORT_PATH }}/rust-dependencies.json || true
+        
+    - name: Run Node.js dependency scan
+      run: |
+        npm audit --json > ${{ env.SECURITY_REPORT_PATH }}/node-dependencies.json || true
+        
+    - name: Generate dependency remediation script
+      run: |
+        python scripts/security/generate_remediation.py --type dependencies --output ${{ env.REMEDIATION_PATH }}/dependencies.sh
+        
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: dependency-security-reports
+        path: |
+          ${{ env.SECURITY_REPORT_PATH }}/python-dependencies.json
+          ${{ env.SECURITY_REPORT_PATH }}/rust-dependencies.json
+          ${{ env.SECURITY_REPORT_PATH }}/node-dependencies.json
+          ${{ env.REMEDIATION_PATH }}/dependencies.sh
+        retention-days: 30
+
+  code-security-analysis:
+    runs-on: ubuntu-latest
+    name: Code Security Analysis
+    needs: setup-security-scan
+    if: contains(needs.setup-security-scan.outputs.scan-matrix, 'code')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+        
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit semgrep
+        
+    - name: Run Bandit static analysis
+      run: |
+        bandit -r . -f json -o ${{ env.SECURITY_REPORT_PATH }}/bandit-report.json || true
+        bandit -r . || true
+        
+    - name: Run Semgrep static analysis
+      run: |
+        semgrep --config=auto --json --output=${{ env.SECURITY_REPORT_PATH }}/semgrep-report.json || true
+        semgrep --config=auto || true
+        
+    - name: Run Rust clippy analysis
+      run: |
+        cargo clippy --all-targets --all-features -- -D warnings || true
+        
+    - name: Run comprehensive code scan
+      run: |
+        python scripts/security/vulnerability_scanner.py --code --output ${{ env.SECURITY_REPORT_PATH }}/code-analysis.json
+        
+    - name: Generate code remediation script
+      run: |
+        python scripts/security/generate_remediation.py --type code --output ${{ env.REMEDIATION_PATH }}/code-fixes.sh
+        
+    - name: Upload code analysis results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: code-security-reports
+        path: |
+          ${{ env.SECURITY_REPORT_PATH }}/bandit-report.json
+          ${{ env.SECURITY_REPORT_PATH }}/semgrep-report.json
+          ${{ env.SECURITY_REPORT_PATH }}/code-analysis.json
+          ${{ env.REMEDIATION_PATH }}/code-fixes.sh
+        retention-days: 30
+
+  container-security-scan:
+    runs-on: ubuntu-latest
+    name: Container Security Scan
+    needs: setup-security-scan
+    if: contains(needs.setup-security-scan.outputs.scan-matrix, 'container')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Install security tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl wget gnupg
+        # Install Hadolint
+        wget -O /tmp/hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+        chmod +x /tmp/hadolint
+        sudo mv /tmp/hadolint /usr/local/bin/hadolint
+        # Install Trivy
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+        
+    - name: Run Hadolint Dockerfile analysis
+      run: |
+        hadolint Dockerfile --format=json > ${{ env.SECURITY_REPORT_PATH }}/hadolint-report.json || true
+        hadolint Dockerfile || true
+        
+    - name: Build test Docker image
+      run: |
+        docker build -t flavorsnap-security-scan .
+        
+    - name: Run Trivy container scan
+      run: |
+        trivy image --format json --output ${{ env.SECURITY_REPORT_PATH }}/trivy-report.json flavorsnap-security-scan || true
+        trivy image flavorsnap-security-scan || true
+        
+    - name: Run comprehensive container scan
+      run: |
+        python scripts/security/vulnerability_scanner.py --container --output ${{ env.SECURITY_REPORT_PATH }}/container-analysis.json
+        
+    - name: Generate container remediation script
+      run: |
+        python scripts/security/generate_remediation.py --type container --output ${{ env.REMEDIATION_PATH }}/container-fixes.sh
+        
+    - name: Upload container scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: container-security-reports
+        path: |
+          ${{ env.SECURITY_REPORT_PATH }}/hadolint-report.json
+          ${{ env.SECURITY_REPORT_PATH }}/trivy-report.json
+          ${{ env.SECURITY_REPORT_PATH }}/container-analysis.json
+          ${{ env.REMEDIATION_PATH }}/container-fixes.sh
+        retention-days: 30
+
+  compliance-check:
+    runs-on: ubuntu-latest
+    name: Security Compliance Check
+    needs: setup-security-scan
+    if: contains(needs.setup-security-scan.outputs.scan-matrix, 'compliance')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests pyyaml
+        
+    - name: Run secret scanning with TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --json --output=${{ env.SECURITY_REPORT_PATH }}/trufflehog-report.json
+        
+    - name: Run secret scanning with Gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        
+    - name: Run comprehensive compliance scan
+      run: |
+        python scripts/security/vulnerability_scanner.py --compliance --output ${{ env.SECURITY_REPORT_PATH }}/compliance-analysis.json
+        
+    - name: Check security headers configuration
+      run: |
+        python scripts/security/check_headers.py --output ${{ env.SECURITY_REPORT_PATH }}/headers-report.json
+        
+    - name: Generate compliance remediation script
+      run: |
+        python scripts/security/generate_remediation.py --type compliance --output ${{ env.REMEDIATION_PATH }}/compliance-fixes.sh
+        
+    - name: Upload compliance check results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: compliance-security-reports
+        path: |
+          ${{ env.SECURITY_REPORT_PATH }}/trufflehog-report.json
+          ${{ env.SECURITY_REPORT_PATH }}/compliance-analysis.json
+          ${{ env.SECURITY_REPORT_PATH }}/headers-report.json
+          ${{ env.REMEDIATION_PATH }}/compliance-fixes.sh
+        retention-days: 30
+
+  automated-remediation:
+    runs-on: ubuntu-latest
+    name: Automated Remediation
+    needs: [setup-security-scan, dependency-vulnerability-scan, code-security-analysis, container-security-scan, compliance-check]
+    if: always() && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      
+    - name: Setup Git config
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+    - name: Run automated remediation
+      run: |
+        python scripts/security/automated_remediation.py --dry-run --output ${{ env.SECURITY_REPORT_PATH }}/remediation-summary.json
+        
+    - name: Create remediation branch
+      if: steps.remediation.outputs.has_fixes == 'true'
+      run: |
+        git checkout -b automated-security-fixes-${{ github.run_number }}
+        
+    - name: Apply automated fixes
+      if: steps.remediation.outputs.has_fixes == 'true'
+      run: |
+        python scripts/security/automated_remediation.py --apply-fixes
+        
+    - name: Commit and push fixes
+      if: steps.remediation.outputs.has_fixes == 'true'
+      run: |
+        git add .
+        git commit -m " Automated security fixes from scan #${{ github.run_number }}"
+        git push origin automated-security-fixes-${{ github.run_number }}
+        
+    - name: Create remediation PR
+      if: steps.remediation.outputs.has_fixes == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        title: "Automated Security Fixes - Scan #${{ github.run_number }}"
+        body: |
+          This PR contains automated security fixes identified during security scan #${{ github.run_number }}.
+          
+          ## Changes
+          - Automated dependency updates for vulnerable packages
+          - Code security fixes applied where possible
+          - Configuration hardening recommendations implemented
+          
+          Please review all changes before merging.
+        branch: automated-security-fixes-${{ github.run_number }}
+        delete-branch: true
+
+  security-summary-report:
+    runs-on: ubuntu-latest
+    name: Security Summary Report
+    needs: [setup-security-scan, dependency-vulnerability-scan, code-security-analysis, container-security-scan, compliance-check]
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Generate comprehensive security report
+      run: |
+        python scripts/security/generate_security_report.py --output-dir ${{ env.SECURITY_REPORT_PATH }}
+        
+    - name: Upload comprehensive report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: comprehensive-security-report
+        path: |
+          ${{ env.SECURITY_REPORT_PATH }}/security-summary.json
+          ${{ env.SECURITY_REPORT_PATH }}/security-report.html
+          ${{ env.SECURITY_REPORT_PATH }}/remediation-priority.json
+        retention-days: 90
+        
+    - name: Create security summary
+      run: |
+        python scripts/security/generate_summary.py >> $GITHUB_STEP_SUMMARY
+        
+    - name: Check for critical vulnerabilities
+      if: needs.setup-security-scan.outputs.should-fail == 'true'
+      run: |
+        python scripts/security/check_critical_vulns.py --fail-threshold high || exit 1
+
+  security-notification:
+    runs-on: ubuntu-latest
+    name: Security Notification
+    needs: [setup-security-scan, security-summary-report]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'push')
+    
+    steps:
+    - name: Download security report
+      uses: actions/download-artifact@v3
+      with:
+        name: comprehensive-security-report
+        path: security-reports
+        
+    - name: Send Slack notification
+      if: env.SLACK_WEBHOOK_URL != ''
+      run: |
+        python scripts/security/send_notification.py --platform slack --webhook ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        
+    - name: Send email notification
+      if: env.SECURITY_EMAIL != ''
+      run: |
+        python scripts/security/send_notification.py --platform email --to ${{ secrets.SECURITY_EMAIL }}
+      env:
+        SECURITY_EMAIL: ${{ secrets.SECURITY_EMAIL }}
+        SMTP_HOST: ${{ secrets.SMTP_HOST }}
+        SMTP_USER: ${{ secrets.SMTP_USER }}
+        SMTP_PASS: ${{ secrets.SMTP_PASS }}

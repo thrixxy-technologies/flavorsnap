@@ -5,12 +5,16 @@ mod types;
 mod admin;
 mod token;
 mod staking;
+mod evaluation;
+mod storage;
 mod test;
 
 pub use types::*;
 pub use admin::*;
 pub use token::*;
 pub use staking::*;
+pub use evaluation::*;
+pub use storage::*;
 
 #[contract]
 pub struct SensoryEvaluation;
@@ -53,6 +57,41 @@ impl SensoryEvaluation {
         staking::unstake_tokens(env, staker, stake_id)
     }
 
+    // Evaluation functions
+    pub fn submit_evaluation(
+        env: Env,
+        evaluator: Address,
+        food_item_id: String,
+        scores: Vec<EvaluationScore>,
+        comments: String,
+        confidence_score: u32,
+    ) -> u32 {
+        evaluation::submit_evaluation(env, evaluator, food_item_id, scores, comments, confidence_score)
+    }
+
+    pub fn verify_evaluation(env: Env, verifier: Address, evaluation_id: u32, approve: bool) {
+        evaluation::verify_evaluation(env, verifier, evaluation_id, approve)
+    }
+
+    pub fn create_dispute(
+        env: Env,
+        challenger: Address,
+        evaluation_id: u32,
+        reason: String,
+    ) -> u32 {
+        evaluation::create_dispute(env, challenger, evaluation_id, reason)
+    }
+
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        dispute_id: u32,
+        resolution: String,
+        approve_dispute: bool,
+    ) {
+        evaluation::resolve_dispute(env, admin, dispute_id, resolution, approve_dispute)
+    }
+
     // Query functions
     pub fn get_balance(env: Env, user: Address) -> u128 {
         token::get_balance(env, user)
@@ -68,5 +107,46 @@ impl SensoryEvaluation {
 
     pub fn get_admins(env: Env) -> Vec<Address> {
         admin::get_admins(env)
+    }
+
+    pub fn get_evaluation_info(env: Env, evaluation_id: u32) -> Evaluation {
+        evaluation::get_evaluation_info(env, evaluation_id)
+    }
+
+    pub fn get_user_evaluation_history(env: Env, user: Address) -> Vec<u32> {
+        evaluation::get_user_evaluation_history(env, user)
+    }
+
+    pub fn get_user_reputation_info(env: Env, user: Address) -> Reputation {
+        evaluation::get_user_reputation_info(env, user)
+    }
+
+    pub fn get_all_disputes(env: Env) -> Vec<DisputeResolution> {
+        evaluation::get_all_disputes(env)
+    }
+
+    pub fn get_expert_panel_members(env: Env) -> Vec<ExpertMember> {
+        evaluation::get_expert_panel_members(env)
+    }
+
+    // Admin-only functions for configuration
+    pub fn set_evaluation_criteria(env: Env, admin: Address, criteria: EvaluationCriteria) {
+        admin::set_evaluation_criteria(env, admin, criteria)
+    }
+
+    pub fn add_expert_panel_member(env: Env, admin: Address, member: ExpertMember) {
+        admin::add_expert_panel_member(env, admin, member)
+    }
+
+    pub fn remove_expert_panel_member(env: Env, admin: Address, member_address: Address) {
+        admin::remove_expert_panel_member(env, admin, member_address)
+    }
+
+    pub fn pause_contract(env: Env, admin: Address) {
+        admin::pause_contract(env, admin)
+    }
+
+    pub fn unpause_contract(env: Env, admin: Address) {
+        admin::unpause_contract(env, admin)
     }
 }

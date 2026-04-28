@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 import traceback
 
 from social_sharing import SocialShareGenerator
+from security_config import InputValidator, validate_json_input
 
 # Create Blueprint
 social_bp = Blueprint('social', __name__, url_prefix='/social')
@@ -17,15 +18,27 @@ share_generator = SocialShareGenerator()
 def generate_shareable_content():
     """Generate shareable content for social media platforms"""
     try:
-        # Get form data
+        # Validate and sanitize JSON input if present
+        if request.is_json:
+            json_data = request.get_json()
+            is_valid, error_msg = validate_json_input(json_data)
+            if not is_valid:
+                return jsonify({'error': error_msg}), 400
+
+        # Get and sanitize form data
         if 'image' not in request.files:
             return jsonify({'error': 'No image provided'}), 400
         
         file = request.files['image']
-        prediction = request.form.get('prediction', '')
+        
+        # Sanitize filename
+        if file.filename:
+            file.filename = InputValidator.sanitize_filename(file.filename)
+        
+        prediction = InputValidator.sanitize_string(request.form.get('prediction', ''), max_length=100)
         confidence = request.form.get('confidence', type=float, default=0.0)
         platforms = request.form.getlist('platforms')
-        template = request.form.get('template', 'default')
+        template = InputValidator.sanitize_string(request.form.get('template', 'default'), max_length=50)
         
         if not prediction:
             return jsonify({'error': 'prediction is required'}), 400
@@ -33,13 +46,21 @@ def generate_shareable_content():
         if confidence < 0 or confidence > 1:
             return jsonify({'error': 'confidence must be between 0 and 1'}), 400
         
+        # Sanitize platforms list
+        sanitized_platforms = []
+        allowed_platforms = ['twitter', 'facebook', 'instagram', 'linkedin', 'whatsapp']
+        for platform in platforms[:10]:  # Limit to 10 platforms
+            sanitized_platform = InputValidator.sanitize_string(str(platform), max_length=50)
+            if sanitized_platform in allowed_platforms:
+                sanitized_platforms.append(sanitized_platform)
+        
         # Process image
         img_bytes = file.read()
         original_image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
         
         # Generate shareable content
         shareable_data = share_generator.create_shareable_response(
-            original_image, prediction, confidence, platforms
+            original_image, prediction, confidence, sanitized_platforms
         )
         
         return jsonify({
@@ -63,15 +84,25 @@ def generate_share_text():
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
         
-        prediction = data.get('prediction', '')
+        # Validate and sanitize JSON input
+        is_valid, error_msg = validate_json_input(data)
+        if not is_valid:
+            return jsonify({'error': error_msg}), 400
+        
+        prediction = InputValidator.sanitize_string(data.get('prediction', ''), max_length=100)
         confidence = data.get('confidence', 0.0)
-        platform = data.get('platform', 'twitter')
+        platform = InputValidator.sanitize_string(data.get('platform', 'twitter'), max_length=50)
         
         if not prediction:
             return jsonify({'error': 'prediction is required'}), 400
         
         if confidence < 0 or confidence > 1:
             return jsonify({'error': 'confidence must be between 0 and 1'}), 400
+        
+        # Validate platform
+        allowed_platforms = ['twitter', 'facebook', 'instagram', 'linkedin', 'whatsapp']
+        if platform not in allowed_platforms:
+            platform = 'twitter'  # Default fallback
         
         # Generate share text
         share_text = share_generator.generate_share_text(prediction, confidence, platform)
@@ -94,19 +125,36 @@ def generate_share_text():
 def generate_share_image():
     """Generate shareable image with overlay"""
     try:
+        # Validate and sanitize JSON input if present
+        if request.is_json:
+            json_data = request.get_json()
+            is_valid, error_msg = validate_json_input(json_data)
+            if not is_valid:
+                return jsonify({'error': error_msg}), 400
+
         if 'image' not in request.files:
             return jsonify({'error': 'No image provided'}), 400
         
         file = request.files['image']
-        prediction = request.form.get('prediction', '')
+        
+        # Sanitize filename
+        if file.filename:
+            file.filename = InputValidator.sanitize_filename(file.filename)
+        
+        prediction = InputValidator.sanitize_string(request.form.get('prediction', ''), max_length=100)
         confidence = request.form.get('confidence', type=float, default=0.0)
-        template = request.form.get('template', 'default')
+        template = InputValidator.sanitize_string(request.form.get('template', 'default'), max_length=50)
         
         if not prediction:
             return jsonify({'error': 'prediction is required'}), 400
         
         if confidence < 0 or confidence > 1:
             return jsonify({'error': 'confidence must be between 0 and 1'}), 400
+        
+        # Validate template
+        allowed_templates = ['default', 'modern', 'classic', 'minimal']
+        if template not in allowed_templates:
+            template = 'default'
         
         # Process image
         img_bytes = file.read()

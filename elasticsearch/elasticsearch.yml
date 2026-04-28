@@ -1,0 +1,31 @@
+# Elasticsearch configuration for FlavorSnap log aggregation
+# Used by the ELK stack (Elasticsearch + Logstash + Kibana)
+
+cluster.name: flavorsnap-logs
+node.name: flavorsnap-es-01
+
+# Paths
+path.data: /usr/share/elasticsearch/data
+path.logs: /usr/share/elasticsearch/logs
+
+# Network
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# Discovery (single-node for development; update for production cluster)
+discovery.type: single-node
+
+# Security (disable for local dev; enable for production)
+xpack.security.enabled: false
+xpack.security.enrollment.enabled: false
+
+# Memory
+bootstrap.memory_lock: true
+
+# Index settings
+action.auto_create_index: true
+indices.query.bool.max_clause_count: 4096
+
+# Logging
+logger.level: INFO

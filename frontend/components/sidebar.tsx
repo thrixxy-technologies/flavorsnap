@@ -20,6 +20,7 @@ const Sidebar = ({ isOpen, onClose }: SidebarProps) => {
 
   const quickActions = [
     { href: '/', label: 'New Classification', icon: '📸' },
+    { href: '/image-editor', label: 'Image Editor', icon: '🎨' },
     { href: '/history', label: 'History', icon: '📋' },
     { href: '/settings', label: 'Settings', icon: '⚙️' },
   ];

@@ -1,1 +1,0 @@
-{"timestamp": "2026-02-24T01:10:08.127667Z", "level": "INFO", "logger": "flavorsnap", "message": "Model loaded successfully from /workspaces/flavorsnap/ml-model-api/../model.pth", "module": "logger_config", "function": "info", "line": 103, "taskName": null, "asctime": "2026-02-24 01:10:08,127"}

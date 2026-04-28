@@ -9,6 +9,7 @@ import os
 import uuid
 from datetime import datetime
 from batch_processor import BatchProcessor
+from security_config import InputValidator, validate_json_input
 
 
 def register_batch_endpoints(app: Flask, batch_processor: BatchProcessor):
@@ -27,6 +28,13 @@ def register_batch_endpoints(app: Flask, batch_processor: BatchProcessor):
     def create_batch_job():
         """Create a new batch processing job"""
         try:
+            # Validate and sanitize JSON input if present
+            if request.is_json:
+                json_data = request.get_json()
+                is_valid, error_msg = validate_json_input(json_data)
+                if not is_valid:
+                    return jsonify({'error': error_msg}), 400
+
             # Check if files are present
             if 'files' not in request.files:
                 return jsonify({'error': 'No files provided'}), 400
@@ -35,12 +43,16 @@ def register_batch_endpoints(app: Flask, batch_processor: BatchProcessor):
             if not files or files[0].filename == '':
                 return jsonify({'error': 'No files selected'}), 400
             
-            # Validate files
+            # Validate and sanitize files
             valid_files = []
             errors = []
             
             for i, file in enumerate(files):
                 if file and allowed_file(file.filename):
+                    # Sanitize filename
+                    if file.filename:
+                        file.filename = InputValidator.sanitize_filename(file.filename)
+                    
                     # Check file size
                     file.seek(0, os.SEEK_END)
                     file_size = file.tell()
@@ -73,15 +85,25 @@ def register_batch_endpoints(app: Flask, batch_processor: BatchProcessor):
                     'provided_files': len(valid_files)
                 }), 400
             
+            # Sanitize any additional form data
+            batch_params = {}
+            for key, value in request.form.items():
+                if key not in ['files']:  # Skip file fields
+                    sanitized_key = InputValidator.sanitize_string(key, max_length=100)
+                    sanitized_value = InputValidator.sanitize_string(str(value), max_length=500)
+                    if sanitized_key:
+                        batch_params[sanitized_key] = sanitized_value
+            
             # Create batch job
-            job_id = batch_processor.create_batch_job(valid_files)
+            job_id = batch_processor.create_batch_job(valid_files, batch_params)
             
             return jsonify({
                 'job_id': job_id,
                 'status': 'pending',
                 'total_files': len(valid_files),
                 'message': f'Batch job created with {len(valid_files)} files',
-                'errors': errors if errors else None
+                'errors': errors if errors else None,
+                'params': batch_params
             }), 201
             
         except Exception as e:

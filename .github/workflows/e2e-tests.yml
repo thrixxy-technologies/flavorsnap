@@ -1,0 +1,127 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main, develop, end-to-end-testing]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  e2e-tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        browser: [chrome, firefox]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Start backend server
+        run: |
+          cd ml-model-api
+          python app.py &
+          sleep 10
+        env:
+          FLASK_ENV: testing
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Start frontend server
+        run: |
+          cd frontend
+          npm run build
+          npm start &
+          sleep 15
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_API_URL: http://localhost:5000
+
+      - name: Wait for services
+        run: |
+          npx wait-on http://localhost:3000 http://localhost:5000/health --timeout 60000
+
+      - name: Run Cypress E2E tests
+        uses: cypress-io/github-action@v6
+        with:
+          browser: ${{ matrix.browser }}
+          config: video=true,screenshotOnRunFailure=true
+          wait-on: "http://localhost:3000, http://localhost:5000/health"
+          wait-on-timeout: 60
+        env:
+          CYPRESS_baseUrl: http://localhost:3000
+          CYPRESS_apiUrl: http://localhost:5000
+          CYPRESS_apiV1Url: http://localhost:8000/api/v1
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cypress-results-${{ matrix.browser }}
+          path: |
+            tests/e2e/screenshots/
+            tests/e2e/videos/
+            test-results/
+          retention-days: 7
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: matrix.browser == 'chrome'
+        with:
+          files: ./coverage/coverage-final.json
+          flags: e2e
+          name: e2e-coverage
+
+  docker-e2e-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and run E2E tests in Docker
+        run: |
+          docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit e2e-tests
+
+      - name: Copy test results from container
+        if: always()
+        run: |
+          docker-compose -f docker-compose.test.yml cp e2e-tests:/app/test-results ./test-results
+
+      - name: Upload Docker test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-e2e-results
+          path: test-results/
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: docker-compose -f docker-compose.test.yml down -v

@@ -1,7 +1,10 @@
 import React from 'react';
 
+import { AppError } from '../types';
+
 interface ErrorMessageProps {
-  message: string;
+  message?: string;
+  error?: AppError | string;
   onRetry?: () => void;
   onDismiss?: () => void;
   variant?: 'inline' | 'modal' | 'toast';
@@ -9,10 +12,13 @@ interface ErrorMessageProps {
 
 export const ErrorMessage: React.FC<ErrorMessageProps> = ({
   message,
+  error,
   onRetry,
   onDismiss,
   variant = 'inline',
 }) => {
+  const displayMessage = message || (typeof error === 'string' ? error : error?.message) || 'An unexpected error occurred';
+  const displayCode = typeof error === 'object' ? error?.code : undefined;
   if (variant === 'toast') {
     return (
       <div className="fixed bottom-4 right-4 max-w-sm bg-red-50 border border-red-200 rounded-lg shadow-lg p-4 z-50">
@@ -31,7 +37,10 @@ export const ErrorMessage: React.FC<ErrorMessageProps> = ({
             </svg>
           </div>
           <div className="ml-3 flex-1">
-            <p className="text-sm text-red-800">{message}</p>
+            <p className="text-sm text-red-800">
+              {displayMessage}
+              {displayCode && <span className="block text-xs font-mono mt-1 opacity-70">Error code: {displayCode}</span>}
+            </p>
           </div>
           <div className="ml-auto pl-3">
             <div className="-mx-1.5 -my-1.5">
@@ -94,7 +103,10 @@ export const ErrorMessage: React.FC<ErrorMessageProps> = ({
                 Error
               </h3>
             </div>
-            <p className="text-gray-600 mb-6">{message}</p>
+            <p className="text-gray-600 mb-6">
+              {displayMessage}
+              {displayCode && <span className="block text-xs font-mono mt-2 text-gray-400">Error code: {displayCode}</span>}
+            </p>
             <div className="flex space-x-3">
               {onRetry && (
                 <button
@@ -139,7 +151,10 @@ export const ErrorMessage: React.FC<ErrorMessageProps> = ({
           </svg>
         </div>
         <div className="ml-3 flex-1">
-          <p className="text-sm text-red-800">{message}</p>
+          <p className="text-sm text-red-800">
+            {displayMessage}
+            {displayCode && <span className="block text-xs font-mono mt-1 opacity-70">Error code: {displayCode}</span>}
+          </p>
         </div>
         {onDismiss && (
           <div className="ml-auto pl-3">

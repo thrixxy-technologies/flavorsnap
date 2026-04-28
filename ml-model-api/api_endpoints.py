@@ -56,6 +56,16 @@ except ImportError as e:
     register_search_endpoints = lambda app: None
     index_database_documents = lambda: None
 
+# Gateway integration imports
+try:
+    from gateway_handlers import APIGateway, Route, HTTPMethod, ServiceEndpoint
+    from middleware import MiddlewareManager
+    from load_balancer import AdvancedLoadBalancer
+    GATEWAY_AVAILABLE = True
+except ImportError:
+    GATEWAY_AVAILABLE = False
+    print("Warning: Gateway components not available")
+
 # Add these endpoints to the existing app.py file
 
 def register_management_endpoints(app, model_registry, ab_test_manager, deployment_manager, model_validator):
@@ -497,7 +507,8 @@ def register_utility_endpoints(app):
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
-            'version': '2.0.0'  # Updated version with model management
+            'version': '2.0.0',  # Updated version with model management
+            'gateway_enabled': GATEWAY_AVAILABLE
         })
     
     @app.route('/api/classes', methods=['GET'])
@@ -687,11 +698,264 @@ def register_all_endpoints(app, model_registry=None, ab_test_manager=None, deplo
     if ab_test_manager:
         register_ab_testing_endpoints(app, ab_test_manager)
     register_utility_endpoints(app)
-    register_validation_endpoints(app)
-    register_search_endpoints(app)
     
-    # Initialize search index on startup
+    # Register gateway endpoints if available
+    if GATEWAY_AVAILABLE:
+        register_gateway_endpoints(app)
+
+def register_gateway_endpoints(app):
+    """Register gateway management endpoints"""
+    
+    @app.route('/gateway/config', methods=['GET'])
+    def get_gateway_config():
+        """Get gateway configuration"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        return jsonify({
+            'name': gateway.config.name,
+            'version': gateway.config.version,
+            'debug': gateway.config.debug,
+            'enable_cors': gateway.config.enable_cors,
+            'cors_origins': gateway.config.cors_origins,
+            'routes_count': len(gateway.routes),
+            'services_count': len(gateway.services),
+            'middleware_count': len(gateway.middleware_manager.middleware_registry)
+        })
+    
+    @app.route('/gateway/routes', methods=['GET'])
+    def list_gateway_routes():
+        """List all gateway routes"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        routes_data = []
+        for route_id, route in gateway.routes.items():
+            route_info = {
+                'id': route_id,
+                'path': route.path,
+                'method': route.method.value,
+                'backend_service': route.backend_service,
+                'version': route.version,
+                'deprecated': route.deprecated,
+                'middleware_chain': route.middleware_chain,
+                'auth_required': route.auth_required
+            }
+            routes_data.append(route_info)
+        
+        return jsonify({
+            'routes': routes_data,
+            'total': len(routes_data)
+        })
+    
+    @app.route('/gateway/services', methods=['GET'])
+    def list_gateway_services():
+        """List all gateway services"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        services_data = []
+        for name, service in gateway.services.items():
+            service_info = {
+                'name': service.name,
+                'hosts': service.hosts,
+                'port': service.port,
+                'protocol': service.protocol,
+                'health_check_path': service.health_check_path
+            }
+            
+            # Add load balancer stats if available
+            if name in gateway.load_balancers:
+                lb_stats = gateway.load_balancers[name].get_backend_stats()
+                service_info['load_balancer'] = {
+                    'total_backends': lb_stats['total_backends'],
+                    'healthy_backends': lb_stats['healthy_backends'],
+                    'algorithm': lb_stats['algorithm']
+                }
+            
+            services_data.append(service_info)
+        
+        return jsonify({
+            'services': services_data,
+            'total': len(services_data)
+        })
+    
+    @app.route('/gateway/metrics', methods=['GET'])
+    def get_gateway_metrics():
+        """Get gateway metrics"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        stats = gateway.get_stats()
+        
+        # Add detailed metrics if available
+        detailed_metrics = {}
+        if hasattr(gateway, 'request_metrics'):
+            detailed_metrics['routes'] = {}
+            for route_key, times in gateway.request_metrics.items():
+                if times:
+                    detailed_metrics['routes'][route_key] = {
+                        'request_count': len(times),
+                        'avg_response_time': sum(times) / len(times),
+                        'min_response_time': min(times),
+                        'max_response_time': max(times)
+                    }
+        
+        return jsonify({
+            **stats,
+            'detailed_metrics': detailed_metrics
+        })
+    
+    @app.route('/gateway/routes', methods=['POST'])
+    def add_gateway_route():
+        """Add a new gateway route"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON'}), 400
+        
+        required_fields = ['path', 'method', 'backend_service']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        try:
+            route = Route(
+                path=data['path'],
+                method=HTTPMethod(data['method'].upper()),
+                backend_service=data['backend_service'],
+                version=data.get('version'),
+                middleware_chain=data.get('middleware_chain', []),
+                auth_required=data.get('auth_required', False),
+                deprecated=data.get('deprecated', False)
+            )
+            
+            route_id = data.get('id', f"route_{len(gateway.routes)}")
+            gateway = app.gateway_instance
+            gateway.add_route(route_id, route)
+            
+            return jsonify({
+                'message': f'Route {route_id} added successfully',
+                'route_id': route_id
+            }), 201
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/gateway/routes/<route_id>', methods=['DELETE'])
+    def remove_gateway_route(route_id):
+        """Remove a gateway route"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        if route_id in gateway.routes:
+            gateway.remove_route(route_id)
+            return jsonify({'message': f'Route {route_id} removed successfully'})
+        else:
+            return jsonify({'error': 'Route not found'}), 404
+    
+    @app.route('/gateway/services', methods=['POST'])
+    def add_gateway_service():
+        """Add a new gateway service"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON'}), 400
+        
+        required_fields = ['name', 'hosts', 'port']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        try:
+            service = ServiceEndpoint(
+                name=data['name'],
+                hosts=data['hosts'],
+                port=data['port'],
+                protocol=data.get('protocol', 'http'),
+                health_check_path=data.get('health_check_path', '/health'),
+                weight=data.get('weight', 1),
+                max_connections=data.get('max_connections', 100)
+            )
+            
+            gateway = app.gateway_instance
+            gateway.add_service(service)
+            
+            return jsonify({
+                'message': f'Service {service.name} added successfully'
+            }), 201
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/gateway/services/<service_name>', methods=['DELETE'])
+    def remove_gateway_service(service_name):
+        """Remove a gateway service"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        if service_name in gateway.services:
+            gateway.remove_service(service_name)
+            return jsonify({'message': f'Service {service_name} removed successfully'})
+        else:
+            return jsonify({'error': 'Service not found'}), 404
+
+def create_gateway_integration(app, gateway_config=None):
+    """Create and integrate gateway with Flask app"""
+    if not GATEWAY_AVAILABLE:
+        print("Gateway components not available, skipping integration")
+        return None
+    
+    if gateway_config is None:
+        gateway_config = {
+            'name': 'FlavorSnap API Gateway',
+            'version': '1.0.0',
+            'debug': app.debug,
+            'enable_cors': True,
+            'cors_origins': ['*']
+        }
+    
     try:
-        index_database_documents()
+        from gateway_handlers import create_gateway
+        gateway = create_gateway(gateway_config)
+        
+        # Store gateway instance in app for access in endpoints
+        app.gateway_instance = gateway
+        
+        # Add default ML model service
+        service = ServiceEndpoint(
+            name='ml-model-api',
+            hosts=['localhost'],
+            port=app.config.get('PORT', 5000),
+            health_check_path='/health'
+        )
+        gateway.add_service(service)
+        
+        # Add default API routes
+        api_routes = [
+            ('api-models-list', Route('/api/models', HTTPMethod.GET, 'ml-model-api')),
+            ('api-models-detail', Route('/api/models/<version>', HTTPMethod.GET, 'ml-model-api')),
+            ('api-predict', Route('/api/predict', HTTPMethod.POST, 'ml-model-api')),
+            ('api-classes', Route('/api/classes', HTTPMethod.GET, 'ml-model-api')),
+            ('api-history', Route('/api/history', HTTPMethod.GET, 'ml-model-api')),
+        ]
+        
+        for route_id, route in api_routes:
+            gateway.add_route(route_id, route)
+        
+        print(f"Gateway integration completed for {gateway.config.name}")
+        return gateway
+        
     except Exception as e:
-        print(f"Warning: Failed to initialize search index: {e}")
+        print(f"Failed to create gateway integration: {e}")
+        return None

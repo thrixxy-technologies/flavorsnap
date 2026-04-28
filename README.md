@@ -56,6 +56,41 @@ Snap a picture of your food and let AI identify the dish instantly!
 - **🐳 Docker Support**: Containerized deployment ready
 - **📊 Analytics**: Classification history and insights
 
+### 🛡️ Advanced Security (NEW)
+
+- **🔍 Automated Vulnerability Scanning**: Comprehensive security scanning with Safety, Bandit, Semgrep
+- **🚨 Real-time Security Alerts**: Intelligent alerting with ML-based anomaly detection
+- **🔧 Automated Remediation**: Self-healing security issues with automated fixes
+- **📊 Security Dashboard**: Real-time monitoring and reporting
+- **🔐 Compliance Checking**: Automated compliance verification and reporting
+
+### 📈 Advanced Monitoring (NEW)
+
+- **📊 Real-time Metrics Collection**: Comprehensive system and application metrics
+- **🚨 Intelligent Alerting**: ML-powered anomaly detection and alert routing
+- **📈 Performance Monitoring**: Real-time performance tracking and optimization
+- **🏥 Health Checks**: Automated system health monitoring
+- **📋 Dashboard Creation**: Interactive monitoring dashboards with real-time updates
+
+### 🌐 Decentralized Storage (NEW)
+
+- **🔗 IPFS Integration**: Decentralized file storage with content addressing
+- **🔍 File Verification System**: Cryptographic file integrity verification
+- **📦 Content Addressing**: Immutable content-based file storage
+- **🔄 Redundancy Management**: Automatic file replication and redundancy
+- **🔐 Access Control**: Granular access control and permissions
+- **⚡ Performance Optimization**: Optimized storage performance and cost monitoring
+
+### 🧪 Advanced Testing & QA (NEW)
+
+- **🤖 Automated Test Suite**: Comprehensive automated testing framework
+- **🚪 Quality Gate Implementation**: Automated quality control with configurable gates
+- **⚡ Performance Testing**: Load testing and performance benchmarking
+- **🔒 Security Testing**: Automated security vulnerability testing
+- **🔗 Integration Testing**: End-to-end integration testing
+- **📊 Test Reporting**: Comprehensive test reporting with analytics
+- **🔄 Continuous Integration**: Full CI/CD pipeline integration
+
 ## 🏗️ Project Structure
 
 FlavorSnap follows a modular microservices architecture with clear separation of concerns. For complete documentation, see [Project Structure Documentation](docs/project_structure.md).
@@ -89,11 +124,14 @@ flavorsnap/
 | Document | Purpose |
 |----------|---------|
 | **[Project Structure](docs/project_structure.md)** | Complete directory structure and organization |
+| **[Blockchain Architecture](docs/blockchain.md)** | Decentralized governance and incentive design |
+| **[Smart Contracts](contracts/README.md)** | Technical documentation for developer and user interactions |
 | **[Development Workflow](docs/development_workflow.md)** | Development process and guidelines |
 | **[File Purposes](docs/file_purposes.md)** | Detailed file responsibilities |
 | **[Installation Guide](docs/installation.md)** | Comprehensive setup instructions |
 | **[Configuration Guide](docs/configuration.md)** | Configuration options and settings |
 | **[Troubleshooting Guide](docs/troubleshooting.md)** | Common issues and solutions |
+| **[Blockchain Integration](docs/blockchain.md)** | Role of Stellar and Soroban in the ecosystem |
 
 ### Development Tools
 
@@ -948,32 +986,32 @@ npm run test
 npm run test:coverage
 npm run test:e2e
 
-# Backend tests
-cd ml-model-api
-python -m pytest
-python -m pytest --cov=app
+# Backend (FastAPI API + Panel UI) tests
+# Runs only tests under `tests/` (see repo `pyproject.toml`).
+python scripts/run_tests.py
 
-# Integration tests
-npm run test:integration
+# Same suite with coverage (enforces 90%+).
+python scripts/coverage_report.py
+
+# Performance benchmarks
+python scripts/run_tests.py --performance-smoke
+python scripts/run_tests.py --performance-full
 ```
 
 ### Test Structure
 
 ```
 tests/
-├── 📁 frontend/
-│   ├── 📁 components/          # Component tests
-│   ├── 📁 pages/              # Page tests
-│   └── 📁 utils/              # Utility tests
-├── 📁 backend/
-│   ├── 📁 api/                # API endpoint tests
-│   └── 📁 model/              # Model tests
-└── 📁 e2e/                    # End-to-end tests
+├── 📁 api/                    # FastAPI endpoint tests (existing)
+├── 📁 unit/                   # Core module unit tests
+├── 📁 integration/            # API/UI integration tests
+└── 📁 performance/           # pytest-benchmark performance checks
 ```
 
 ### Test Data
 
-Test images are available in `tests/fixtures/images/` with proper labels for validation.
+Most Python fixtures are generated deterministically at runtime (see `tests/conftest.py`).
+Any on-disk lightweight assets live under `tests/fixtures/`.
 
 ## 📊 Model Information
 
