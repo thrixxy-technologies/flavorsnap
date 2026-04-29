@@ -34,6 +34,9 @@ try:
         register_search_endpoints,
         index_database_documents
     )
+    from storage_handlers import StorageHandler, get_storage_handler, StorageConfig, StorageProvider
+    from cdn_integration import CDNManager, get_cdn_manager, CDNConfig, CDNProvider
+    from model_inference import ModelInference, get_model_inference, create_inference_request, InferenceMode
 except ImportError as e:
     print(f"Warning: Could not import new modules: {e}")
     # Fallback classes
@@ -488,6 +491,228 @@ def register_validation_endpoints(app):
             summary = create_security_report_summary(app)
             return jsonify(summary)
 
+def register_storage_endpoints(app):
+    """Register storage management endpoints"""
+    
+    @app.route('/api/storage/upload', methods=['POST'])
+    def upload_file():
+        """Upload file to advanced storage"""
+        try:
+            if 'file' not in request.files:
+                return jsonify({'error': 'No file provided'}), 400
+            
+            file = request.files['file']
+            storage_tier = request.form.get('storage_tier', 'standard')
+            metadata = json.loads(request.form.get('metadata', '{}'))
+            
+            storage_handler = get_storage_handler()
+            
+            # Read file data
+            file_data = file.read()
+            
+            # Upload to storage
+            result = asyncio.run(storage_handler.upload_file(
+                file_data=file_data,
+                filename=file.filename,
+                content_type=file.content_type,
+                metadata=metadata,
+                storage_tier=StorageTier(storage_tier) if storage_tier in [t.value for t in StorageTier] else StorageTier.STANDARD
+            ))
+            
+            return jsonify({
+                'success': True,
+                'filename': result.filename,
+                'size_bytes': result.size_bytes,
+                'cdn_url': result.cdn_url,
+                'storage_tier': result.storage_tier.value,
+                'etag': result.etag
+            })
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/storage/download/<path:object_key>', methods=['GET'])
+    def download_file(object_key):
+        """Download file from storage"""
+        try:
+            storage_handler = get_storage_handler()
+            
+            # Handle range requests
+            range_header = request.headers.get('Range')
+            
+            file_data, metadata = asyncio.run(storage_handler.download_file(object_key, range_header))
+            
+            # Create response
+            response = make_response(file_data)
+            response.headers['Content-Type'] = metadata.content_type
+            response.headers['Content-Length'] = str(len(file_data))
+            response.headers['ETag'] = metadata.etag
+            
+            if range_header:
+                # Handle partial content
+                response.status_code = 206
+                # Would need proper range parsing here
+            
+            return response
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/storage/files', methods=['GET'])
+    def list_files():
+        """List files in storage"""
+        try:
+            prefix = request.args.get('prefix', '')
+            limit = int(request.args.get('limit', 100))
+            
+            storage_handler = get_storage_handler()
+            files = asyncio.run(storage_handler.list_files(prefix, limit))
+            
+            return jsonify({
+                'files': [
+                    {
+                        'filename': f.filename,
+                        'size_bytes': f.size_bytes,
+                        'content_type': f.content_type,
+                        'storage_tier': f.storage_tier.value,
+                        'upload_time': f.upload_time.isoformat(),
+                        'cdn_url': f.cdn_url,
+                        'etag': f.etag
+                    }
+                    for f in files
+                ],
+                'count': len(files)
+            })
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/storage/stats', methods=['GET'])
+    def get_storage_stats():
+        """Get storage statistics"""
+        try:
+            storage_handler = get_storage_handler()
+            stats = asyncio.run(storage_handler.get_storage_stats())
+            
+            return jsonify({
+                'total_files': stats.total_files,
+                'total_size_gb': stats.total_size_gb,
+                'upload_count': stats.upload_count,
+                'download_count': stats.download_count,
+                'delete_count': stats.delete_count,
+                'bandwidth_used_gb': stats.bandwidth_used_bytes / (1024**3),
+                'cost_estimate': stats.cost_estimate,
+                'cache_hit_rate': stats.cache_hit_rate,
+                'storage_by_tier': stats.storage_by_tier
+            })
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/storage/delete/<path:object_key>', methods=['DELETE'])
+    def delete_file(object_key):
+        """Delete file from storage"""
+        try:
+            storage_handler = get_storage_handler()
+            success = asyncio.run(storage_handler.delete_file(object_key))
+            
+            if success:
+                return jsonify({'message': 'File deleted successfully'})
+            else:
+                return jsonify({'error': 'Failed to delete file'}), 500
+                
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+def register_cdn_endpoints(app):
+    """Register CDN management endpoints"""
+    
+    @app.route('/api/cdn/purge', methods=['POST'])
+    def purge_cdn_cache():
+        """Purge CDN cache"""
+        try:
+            data = request.get_json() or {}
+            urls = data.get('urls', [])
+            patterns = data.get('patterns', [])
+            purge_type = data.get('purge_type', 'invalidate')
+            
+            cdn_manager = get_cdn_manager()
+            purge_request = asyncio.run(cdn_manager.purge_cache(urls, patterns, purge_type))
+            
+            return jsonify({
+                'status': purge_request.status,
+                'created_at': purge_request.created_at.isoformat(),
+                'completed_at': purge_request.completed_at.isoformat() if purge_request.completed_at else None,
+                'urls_purged': len(purge_request.urls),
+                'patterns_purged': len(purge_request.patterns)
+            })
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/cdn/analytics', methods=['GET'])
+    def get_cdn_analytics():
+        """Get CDN analytics"""
+        try:
+            start_date = request.args.get('start_date')
+            end_date = request.args.get('end_date')
+            
+            if start_date:
+                start_date = datetime.fromisoformat(start_date)
+            if end_date:
+                end_date = datetime.fromisoformat(end_date)
+            
+            cdn_manager = get_cdn_manager()
+            stats = asyncio.run(cdn_manager.get_analytics(start_date, end_date))
+            
+            return jsonify({
+                'total_requests': stats.total_requests,
+                'cache_hits': stats.cache_hits,
+                'cache_misses': stats.cache_misses,
+                'hit_rate': stats.hit_rate,
+                'bandwidth_saved_gb': stats.bandwidth_saved_bytes / (1024**3),
+                'bandwidth_served_gb': stats.bandwidth_served_bytes / (1024**3),
+                'average_response_time': stats.average_response_time,
+                'error_rate': stats.error_rate,
+                'cost_savings': stats.cost_savings,
+                'top_files': stats.top_files,
+                'geographic_distribution': stats.geographic_distribution
+            })
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/cdn/optimize', methods=['POST'])
+    def optimize_image_delivery():
+        """Optimize image delivery"""
+        try:
+            data = request.get_json()
+            image_url = data.get('image_url')
+            device_type = data.get('device_type', 'desktop')
+            
+            if not image_url:
+                return jsonify({'error': 'image_url is required'}), 400
+            
+            cdn_manager = get_cdn_manager()
+            optimization = asyncio.run(cdn_manager.optimize_image_delivery(image_url, device_type))
+            
+            return jsonify(optimization)
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/cdn/metrics', methods=['GET'])
+    def get_real_time_metrics():
+        """Get real-time CDN metrics"""
+        try:
+            cdn_manager = get_cdn_manager()
+            metrics = asyncio.run(cdn_manager.get_real_time_metrics())
+            
+            return jsonify(metrics)
+            
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
 def register_utility_endpoints(app):
     """Register utility endpoints"""
     
@@ -689,6 +914,8 @@ def register_all_endpoints(app, model_registry=None, ab_test_manager=None, deplo
     register_utility_endpoints(app)
     register_validation_endpoints(app)
     register_search_endpoints(app)
+    register_storage_endpoints(app)
+    register_cdn_endpoints(app)
     
     # Initialize search index on startup
     try:

@@ -146,6 +146,40 @@ ALERT_COUNT = Counter(
     ['severity', 'type']
 )
 
+# Storage and CDN metrics
+STORAGE_OPERATIONS = Counter(
+    'storage_operations_total',
+    'Total storage operations',
+    ['operation', 'status']
+)
+
+STORAGE_BANDWIDTH = Counter(
+    'storage_bandwidth_bytes_total',
+    'Total storage bandwidth',
+    ['direction']
+)
+
+CDN_REQUESTS = Counter(
+    'cdn_requests_total',
+    'Total CDN requests',
+    ['status', 'cache_hit']
+)
+
+CDN_BANDWIDTH_SAVED = Counter(
+    'cdn_bandwidth_saved_bytes_total',
+    'Total CDN bandwidth saved'
+)
+
+STORAGE_COST = Gauge(
+    'storage_cost_usd',
+    'Current storage cost in USD'
+)
+
+CDN_COST_SAVINGS = Gauge(
+    'cdn_cost_savings_usd',
+    'CDN cost savings in USD'
+)
+
 class MonitoringMiddleware:
     def __init__(self, app: Flask = None):
         self.app = app
@@ -782,6 +816,30 @@ class InfrastructureMonitor:
             'status': status,
             'timestamp': datetime.now().isoformat()
         })
+    
+    def track_storage_operation(self, operation: str, status: str, size_bytes: int = 0):
+        """Track storage operation metrics"""
+        STORAGE_OPERATIONS.labels(operation=operation, status=status).inc()
+        
+        if operation in ['upload', 'download'] and size_bytes > 0:
+            direction = 'upload' if operation == 'upload' else 'download'
+            STORAGE_BANDWIDTH.labels(direction=direction).inc(size_bytes)
+    
+    def track_cdn_request(self, status: str, cache_hit: bool, bandwidth_saved: int = 0):
+        """Track CDN request metrics"""
+        cache_status = 'hit' if cache_hit else 'miss'
+        CDN_REQUESTS.labels(status=status, cache_hit=cache_status).inc()
+        
+        if bandwidth_saved > 0:
+            CDN_BANDWIDTH_SAVED.inc(bandwidth_saved)
+    
+    def update_storage_cost(self, cost_usd: float):
+        """Update storage cost metric"""
+        STORAGE_COST.set(cost_usd)
+    
+    def update_cdn_cost_savings(self, savings_usd: float):
+        """Update CDN cost savings metric"""
+        CDN_COST_SAVINGS.set(savings_usd)
     
     def resolve_alert(self, alert_index: int):
         """Resolve an alert"""
