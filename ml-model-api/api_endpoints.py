@@ -3,12 +3,59 @@ Enhanced API Endpoints with Advanced Rate Limiting for FlavorSnap
 Provides rate-limited endpoints with monitoring, analytics, and graceful degradation
 """
 
-import time
-import psutil
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-from flask import Blueprint, request, jsonify, g, current_app
-from functools import wraps
+from flask import Flask, request, jsonify
+import json
+from datetime import datetime
+try:
+    from db_config import get_connection
+    from persistence import purge_old_history
+    from security_config import (
+        InputValidator, 
+        FileValidator, 
+        JSONValidator,
+        SecurityMiddleware,
+        ValidationReport,
+        SecurityScore
+    )
+    from image_optimizer import (
+        ImageProcessor,
+        ImageOptimizer,
+        ImageEnhancer,
+        ThumbnailGenerator,
+        BatchProcessor,
+        ImageMetadata
+    )
+    from test_input_validation import (
+        TestInputValidation,
+        TestImageOptimization
+    )
+    from search_handlers import (
+        SearchIndexer,
+        SearchAnalytics,
+        register_search_endpoints,
+        index_database_documents
+    )
+except ImportError as e:
+    print(f"Warning: Could not import new modules: {e}")
+    # Fallback classes
+    InputValidator = object
+    FileValidator = object
+    JSONValidator = object
+    SecurityMiddleware = object
+    ValidationReport = object
+    SecurityScore = object
+    ImageProcessor = object
+    ImageOptimizer = object
+    ImageEnhancer = object
+    ThumbnailGenerator = object
+    BatchProcessor = object
+    ImageMetadata = object
+    TestInputValidation = object
+    TestImageOptimization = object
+    SearchIndexer = object
+    SearchAnalytics = object
+    register_search_endpoints = lambda app: None
+    index_database_documents = lambda: None
 
 from security_config import (
     get_rate_limiter, 
@@ -186,30 +233,120 @@ def predict():
         # Check if queue processing is requested
         use_queue = request.form.get('use_queue', 'false').lower() == 'true'
         
-        if use_queue and batch_processor:
-            priority_str = request.form.get('priority', 'normal')
-            priority_map = {
-                'low': TaskPriority.LOW,
-                'normal': TaskPriority.NORMAL,
-                'high': TaskPriority.HIGH,
-                'critical': TaskPriority.CRITICAL
-            }
-            priority = priority_map.get(priority_str.lower(), TaskPriority.NORMAL)
-            
-            task_payload = {
-                'image_data': image_bytes,
-                'filename': file.filename,
-                'metadata': {
-                    'content_type': file.content_type,
-                    'file_size': len(image_bytes),
-                    'user_type': getattr(g, 'rate_limit_info', {}).get('user_type', 'free')
-                }
-            }
-            
-            task_id = batch_processor.submit_task(
-                payload=task_payload,
-                priority=priority,
-                metadata={'filename': file.filename}
+        if success:
+            return jsonify({'message': f'Model {data["version"]} registered successfully'}), 201
+        else:
+            return jsonify({'error': 'Failed to register model'}), 500
+    
+    @app.route('/api/models/<version>/activate', methods=['POST'])
+    def activate_model(version):
+        """Activate a model version"""
+        success = model_registry.activate_model(version)
+        if success:
+            return jsonify({'message': f'Model {version} activated successfully'})
+        else:
+            return jsonify({'error': 'Failed to activate model'}), 500
+    
+    @app.route('/api/models/<version>/validate', methods=['POST'])
+    def validate_model(version):
+        """Validate a model version"""
+        try:
+            result = model_validator.validate_model(version)
+            return jsonify({
+                'model_version': result.model_version,
+                'validation_timestamp': result.validation_timestamp,
+                'passed': result.passed,
+                'overall_score': result.overall_score,
+                'accuracy': result.accuracy,
+                'precision': result.precision,
+                'recall': result.recall,
+                'f1_score': result.f1_score,
+                'avg_inference_time': result.avg_inference_time,
+                'avg_confidence': result.avg_confidence,
+                'model_integrity_passed': result.model_integrity_passed,
+                'performance_regression_detected': result.performance_regression_detected,
+                'error_messages': result.error_messages,
+                'detailed_metrics': result.detailed_metrics,
+                'confusion_matrix_path': result.confusion_matrix_path
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/models/<version>/deploy', methods=['POST'])
+    def deploy_model(version):
+        """Deploy a model version"""
+        force = request.json.get('force', False) if request.json else False
+        
+        success = deployment_manager.deploy_model(version, force)
+        if success:
+            return jsonify({'message': f'Model {version} deployed successfully'})
+        else:
+            return jsonify({'error': 'Failed to deploy model'}), 500
+    
+    @app.route('/api/deployment/rollback', methods=['POST'])
+    def rollback_model():
+        """Rollback to a previous model version"""
+        data = request.get_json()
+        target_version = data.get('target_version')
+        reason = data.get('reason', 'Manual rollback')
+        
+        if not target_version:
+            return jsonify({'error': 'target_version is required'}), 400
+        
+        success = deployment_manager.rollback_model(target_version, reason)
+        if success:
+            return jsonify({'message': f'Rolled back to model {target_version}'})
+        else:
+            return jsonify({'error': 'Failed to rollback model'}), 500
+    
+    @app.route('/api/deployment/health', methods=['GET'])
+    def deployment_health():
+        """Get deployment health status"""
+        model_version = request.args.get('model_version')
+        health = deployment_manager.health_check(model_version)
+        return jsonify(health)
+    
+    @app.route('/api/deployment/history', methods=['GET'])
+    def deployment_history():
+        """Get deployment history"""
+        limit = request.args.get('limit', 50, type=int)
+        history = deployment_manager.get_deployment_history(limit)
+        return jsonify({'history': history})
+    
+    @app.route('/api/deployment/rollback-versions', methods=['GET'])
+    def available_rollback_versions():
+        """Get available rollback versions"""
+        versions = deployment_manager.get_available_rollback_versions()
+        return jsonify({'versions': versions})
+
+def register_ab_testing_endpoints(app, ab_test_manager):
+    """Register A/B testing endpoints"""
+    
+    @app.route('/api/ab-tests', methods=['GET'])
+    def list_ab_tests():
+        """List all A/B tests"""
+        status = request.args.get('status')
+        tests = ab_test_manager.list_tests(status)
+        return jsonify({'tests': tests})
+    
+    @app.route('/api/ab-tests', methods=['POST'])
+    def create_ab_test():
+        """Create a new A/B test"""
+        data = request.get_json()
+        
+        required_fields = ['model_a_version', 'model_b_version']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        try:
+            test_id = ab_test_manager.create_test(
+                model_a_version=data['model_a_version'],
+                model_b_version=data['model_b_version'],
+                traffic_split=data.get('traffic_split', 0.5),
+                description=data.get('description', ''),
+                min_sample_size=data.get('min_sample_size', 100),
+                confidence_threshold=data.get('confidence_threshold', 0.95)
             )
             
             # Save to persistence
@@ -268,87 +405,204 @@ def predict():
         logger.error(f"Prediction error: {e}")
         return jsonify({'error': 'Prediction failed', 'message': str(e)}), 500
 
-@api_bp.route('/batch', methods=['POST'])
-@endpoint_rate_limit('batch')
-@graceful_degradation()
-def submit_batch():
-    """Submit batch processing task with rate limiting"""
-    try:
-        from app import batch_processor, queue_persistence
-        from batch_processor import TaskPriority
-        from persistence import PersistentTask, TaskStatus
+def register_validation_endpoints(app):
+    """Register input validation and security endpoints"""
+    
+    if InputValidator and ImageOptimizer:
+        validator = InputValidator(ValidationLevel.MODERATE)
+        optimizer = ImageOptimizer()
         
-        if 'images' not in request.files:
-            return jsonify({'error': 'No images uploaded'}), 400
-        
-        files = request.files.getlist('images')
-        if not files:
-            return jsonify({'error': 'No files selected'}), 400
-        
-        # Validate batch size
-        max_batch_size = int(request.form.get('max_batch_size', 10))
-        if len(files) > max_batch_size:
+        @app.route('/api/validate/text', methods=['POST'])
+        def validate_text():
+            """Validate text input"""
+            data = request.get_json()
+            if not data or 'text' not in data:
+                return jsonify({'error': 'text field is required'}), 400
+            
+            field_name = data.get('field_name', 'input')
+            max_length = data.get('max_length', 1000)
+            allow_html = data.get('allow_html', False)
+            
+            result = validator.validate_text_input(
+                data['text'], field_name, max_length, allow_html
+            )
+            
             return jsonify({
-                'error': f'Batch size too large',
-                'message': f'Maximum batch size is {max_batch_size} files',
-                'provided_count': len(files)
-            }), 400
+                'is_valid': result.is_valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'sanitized_data': result.sanitized_data,
+                'security_score': result.security_score,
+                'metadata': result.metadata
+            })
         
-        priority_str = request.form.get('priority', 'normal')
-        priority_map = {
-            'low': TaskPriority.LOW,
-            'normal': TaskPriority.NORMAL,
-            'high': TaskPriority.HIGH,
-            'critical': TaskPriority.CRITICAL
-        }
-        priority = priority_map.get(priority_str.lower(), TaskPriority.NORMAL)
+        @app.route('/api/validate/file', methods=['POST'])
+        def validate_file():
+            """Validate file upload"""
+            if 'file' not in request.files:
+                return jsonify({'error': 'file is required'}), 400
+            
+            file = request.files['file']
+            field_name = request.form.get('field_name', 'file')
+            
+            result = validator.validate_file_upload(file, field_name)
+            
+            return jsonify({
+                'is_valid': result.is_valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'security_score': result.security_score,
+                'metadata': result.metadata
+            })
         
-        # Process batch
-        batch_tasks = []
-        for file in files:
-            if file.filename:
-                image_bytes = file.stream.read()
-                file.stream.seek(0)
-                
-                task_payload = {
-                    'image_data': image_bytes,
-                    'filename': file.filename,
-                    'metadata': {
-                        'content_type': file.content_type,
-                        'file_size': len(image_bytes),
-                        'batch_id': request.form.get('batch_id'),
-                        'user_type': getattr(g, 'rate_limit_info', {}).get('user_type', 'free')
-                    }
-                }
-                
-                task_id = batch_processor.submit_task(
-                    payload=task_payload,
-                    priority=priority,
-                    metadata={'filename': file.filename, 'batch': True}
-                )
-                
-                batch_tasks.append({
-                    'task_id': task_id,
-                    'filename': file.filename
+        @app.route('/api/validate/json', methods=['POST'])
+        def validate_json():
+            """Validate JSON input"""
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'JSON data is required'}), 400
+            
+            schema = data.get('schema')
+            json_data = data.get('data', data)
+            
+            result = validator.validate_json_input(json_data, schema)
+            
+            return jsonify({
+                'is_valid': result.is_valid,
+                'errors': result.errors,
+                'warnings': result.warnings,
+                'sanitized_data': result.sanitized_data,
+                'security_score': result.security_score,
+                'metadata': result.metadata
+            })
+        
+        @app.route('/api/optimize/image', methods=['POST'])
+        def optimize_image():
+            """Optimize uploaded image"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            output_format = request.form.get('format', 'JPEG')
+            preset = request.form.get('preset', 'web')
+            
+            # Read image data
+            image_data = file.read()
+            
+            result = optimizer.optimize_image(
+                image_data, output_format, preset
+            )
+            
+            if result.success:
+                response = jsonify({
+                    'success': True,
+                    'original_size': result.original_size,
+                    'optimized_size': result.optimized_size,
+                    'compression_ratio': result.compression_ratio,
+                    'format': result.format,
+                    'dimensions': result.dimensions,
+                    'processing_time': result.processing_time,
+                    'errors': result.errors,
+                    'warnings': result.warnings,
+                    'metadata': result.metadata
                 })
+                
+                # Add optimized image as base64 if requested
+                if request.form.get('include_data') == 'true':
+                    import base64
+                    optimized_data = result.metadata.get('optimized_data')
+                    if optimized_data:
+                        response.json['optimized_data'] = base64.b64encode(optimized_data).decode()
+                
+                return response
+            else:
+                return jsonify({
+                    'success': False,
+                    'errors': result.errors,
+                    'warnings': result.warnings,
+                    'metadata': result.metadata
+                }), 400
         
-        batch_id = f"batch_{int(time.time())}"
+        @app.route('/api/image/info', methods=['POST'])
+        def get_image_info():
+            """Get image information"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            image_data = file.read()
+            
+            info = optimizer.get_image_info(image_data)
+            
+            return jsonify(info)
         
-        # Save batch to persistence
-        if queue_persistence:
-            for task_data in batch_tasks:
-                persistent_task = PersistentTask(
-                    id=task_data['task_id'],
-                    priority=priority.value,
-                    status=TaskStatus.PENDING,
-                    payload={'batch_id': batch_id},
-                    created_at=datetime.now(),
-                    metadata={'filename': task_data['filename'], 'batch': True}
+        @app.route('/api/image/thumbnail', methods=['POST'])
+        def create_thumbnail():
+            """Create thumbnail from image"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            image_data = file.read()
+            
+            width = int(request.form.get('width', 150))
+            height = int(request.form.get('height', 150))
+            crop_to_fit = request.form.get('crop_to_fit', 'true').lower() == 'true'
+            
+            try:
+                thumbnail_data = optimizer.create_thumbnail(
+                    image_data, (width, height), crop_to_fit
                 )
-                queue_persistence.save_task(persistent_task)
+                
+                import base64
+                return jsonify({
+                    'success': True,
+                    'thumbnail_data': base64.b64encode(thumbnail_data).decode(),
+                    'size': len(thumbnail_data)
+                })
+            
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
         
-        logger.info(f"Batch {batch_id} submitted with {len(batch_tasks)} tasks")
+        @app.route('/api/image/suggestions', methods=['POST'])
+        def get_optimization_suggestions():
+            """Get optimization suggestions for image"""
+            if 'image' not in request.files:
+                return jsonify({'error': 'image file is required'}), 400
+            
+            file = request.files['image']
+            image_data = file.read()
+            
+            suggestions = optimizer.get_optimization_suggestions(image_data)
+            
+            return jsonify(suggestions)
         
+        @app.route('/api/security/report', methods=['GET'])
+        def get_security_report():
+            """Get security validation report summary"""
+            from security_config import create_security_report_summary
+            summary = create_security_report_summary(app)
+            return jsonify(summary)
+
+def register_utility_endpoints(app):
+    """Register utility endpoints"""
+    
+    @app.route('/health', methods=['GET'])
+    def health_check():
+        """Basic health check endpoint"""
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'version': '2.0.0',  # Updated version with model management
+            'gateway_enabled': GATEWAY_AVAILABLE
+        })
+    
+    @app.route('/api/classes', methods=['GET'])
+    def get_classes():
+        """Get supported food classes"""
         return jsonify({
             'batch_id': batch_id,
             'status': 'queued',
@@ -435,6 +689,76 @@ def get_queue_status():
                     'cached': True,
                     'rate_limit_info': getattr(g, 'rate_limit_info', {})
                 })
+            return jsonify({'items': items, 'count': len(items)})
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @app.route('/admin/retention/run', methods=['POST'])
+    def run_retention():
+        days = request.args.get('days', type=int) or 90
+        try:
+            deleted = purge_old_history(days)
+            return jsonify({'status': 'ok', 'deleted': deleted, 'days': days})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+# Function to register all endpoints
+def register_all_endpoints(app, model_registry=None, ab_test_manager=None, deployment_manager=None, model_validator=None):
+    """Register all endpoints"""
+    if model_registry and deployment_manager and model_validator:
+        register_management_endpoints(app, model_registry, ab_test_manager, deployment_manager, model_validator)
+    if ab_test_manager:
+        register_ab_testing_endpoints(app, ab_test_manager)
+    register_utility_endpoints(app)
+    
+    # Register gateway endpoints if available
+    if GATEWAY_AVAILABLE:
+        register_gateway_endpoints(app)
+
+def register_gateway_endpoints(app):
+    """Register gateway management endpoints"""
+    
+    @app.route('/gateway/config', methods=['GET'])
+    def get_gateway_config():
+        """Get gateway configuration"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        return jsonify({
+            'name': gateway.config.name,
+            'version': gateway.config.version,
+            'debug': gateway.config.debug,
+            'enable_cors': gateway.config.enable_cors,
+            'cors_origins': gateway.config.cors_origins,
+            'routes_count': len(gateway.routes),
+            'services_count': len(gateway.services),
+            'middleware_count': len(gateway.middleware_manager.middleware_registry)
+        })
+    
+    @app.route('/gateway/routes', methods=['GET'])
+    def list_gateway_routes():
+        """List all gateway routes"""
+        if not hasattr(app, 'gateway_instance'):
+            return jsonify({'error': 'Gateway not configured'}), 503
+        
+        gateway = app.gateway_instance
+        routes_data = []
+        for route_id, route in gateway.routes.items():
+            route_info = {
+                'id': route_id,
+                'path': route.path,
+                'method': route.method.value,
+                'backend_service': route.backend_service,
+                'version': route.version,
+                'deprecated': route.deprecated,
+                'middleware_chain': route.middleware_chain,
+                'auth_required': route.auth_required
+            }
+            routes_data.append(route_info)
         
         # Get current queue status
         queue_stats = batch_processor.get_queue_stats()
