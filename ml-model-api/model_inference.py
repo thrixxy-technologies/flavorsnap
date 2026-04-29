@@ -1,493 +1,438 @@
 """
-Model Inference with Advanced Caching Integration
-Provides ML model inference with caching, monitoring, and optimization
+Model inference module for FlavorSnap.
+
+Handles model loading, preprocessing, and prediction with caching support.
 """
 
 import torch
+import torch.nn as nn
 import torchvision.transforms as transforms
+from torchvision import models
 from PIL import Image
-import io
-import json
-import logging
-import time
-from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
-from enum import Enum
 import numpy as np
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import hashlib
+import json
+import os
+import logging
+from typing import Dict, List, Tuple, Any, Optional
+import time
+import base64
+import io
+
+# XAI imports
+try:
+    from xai import ModelExplainer
+    from visualization import XAIVisualizer
+    XAI_AVAILABLE = True
+except ImportError:
+    XAI_AVAILABLE = False
+    logging.warning("XAI modules not available. XAI features will be disabled.")
 
 logger = logging.getLogger(__name__)
 
-class ModelStatus(Enum):
-    """Model status"""
-    LOADING = "loading"
-    READY = "ready"
-    ERROR = "error"
-    UPDATING = "updating"
-
-class InferenceMode(Enum):
-    """Inference modes"""
-    SINGLE = "single"
-    BATCH = "batch"
-    STREAMING = "streaming"
-
-@dataclass
-class InferenceRequest:
-    """Inference request data"""
-    request_id: str
-    image_data: bytes
-    model_version: str
-    mode: InferenceMode
-    timestamp: datetime
-    user_id: Optional[str] = None
-    metadata: Dict[str, Any] = None
-
-@dataclass
-class InferenceResult:
-    """Inference result data"""
-    request_id: str
-    predictions: List[Dict[str, Any]]
-    confidence_scores: List[float]
-    processing_time: float
-    model_version: str
-    cache_hit: bool
-    timestamp: datetime
-    metadata: Dict[str, Any] = None
-
-@dataclass
-class ModelMetrics:
-    """Model performance metrics"""
-    model_version: str
-    total_inferences: int
-    avg_processing_time: float
-    cache_hit_rate: float
-    error_rate: float
-    memory_usage_mb: float
-    gpu_utilization: float
-    last_updated: datetime
-
 class ModelInference:
-    """Advanced model inference with caching and optimization"""
-    
+    """PyTorch model inference engine"""
+
     def __init__(self, model_path: str = None, classes_path: str = None):
-        self.model_path = model_path or "model.pth"
-        self.classes_path = classes_path or "food_classes.txt"
-        self.logger = logging.getLogger(__name__)
-        
-        # Model state
+        """
+        Initialize model inference engine
+
+        Args:
+            model_path: Path to PyTorch model file
+            classes_path: Path to classes text file
+        """
+        self.model_path = model_path or os.path.join(os.path.dirname(__file__), '..', 'models', 'model.pth')
+        self.classes_path = classes_path or os.path.join(os.path.dirname(__file__), '..', 'food_classes.txt')
         self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.classes = []
-        self.status = ModelStatus.LOADING
-        self.current_version = "1.0.0"
-        
-        # Performance tracking
-        self.metrics = ModelMetrics(
-            model_version=self.current_version,
-            total_inferences=0,
-            avg_processing_time=0.0,
-            cache_hit_rate=0.0,
-            error_rate=0.0,
-            memory_usage_mb=0.0,
-            gpu_utilization=0.0,
-            last_updated=datetime.now()
-        )
-        
-        # Caching
-        self.result_cache = {}
-        self.cache_ttl = timedelta(minutes=15)
-        self.max_cache_size = 1000
-        
-        # Optimization
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self.batch_size = 8
-        self.transform = None
-        
-        # Initialize model and classes
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._load_model()
         self._load_classes()
-        self._setup_transforms()
-    
-    def _load_model(self):
-        """Load the ML model"""
-        try:
-            self.logger.info(f"Loading model from {self.model_path}")
-            
-            # Load model with error handling
+
+        # Define preprocessing transforms
+        self.transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        
+        # Initialize XAI components if available
+        self.explainer = None
+        self.visualizer = None
+        if XAI_AVAILABLE:
             try:
-                self.model = torch.load(self.model_path, map_location=self.device)
-                self.model.eval()
-                self.model.to(self.device)
-                self.status = ModelStatus.READY
-                self.logger.info("Model loaded successfully")
+                self.explainer = ModelExplainer(self.model)
+                self.explainer.class_names = self.classes
+                self.visualizer = XAIVisualizer()
+                logger.info("XAI components initialized successfully")
             except Exception as e:
-                self.logger.error(f"Failed to load model: {e}")
-                self.status = ModelStatus.ERROR
-                raise
-                
+                logger.warning(f"Failed to initialize XAI components: {e}")
+                self.explainer = None
+                self.visualizer = None
+
+    def _load_model(self):
+        """Load PyTorch model"""
+        try:
+            if not os.path.exists(self.model_path):
+                logger.warning(f"Model file not found: {self.model_path}. Using dummy model.")
+                self.model = self._create_dummy_model()
+                return
+
+            # Load ResNet18 model
+            self.model = models.resnet18(pretrained=False)
+            num_classes = len(self._read_classes_file())
+            self.model.fc = nn.Linear(self.model.fc.in_features, num_classes)
+
+            # Load trained weights
+            state_dict = torch.load(self.model_path, map_location=self.device)
+            self.model.load_state_dict(state_dict)
+            self.model.to(self.device)
+            self.model.eval()
+
+            logger.info(f"Model loaded successfully from {self.model_path}")
+
         except Exception as e:
-            self.logger.error(f"Model loading failed: {e}")
-            self.status = ModelStatus.ERROR
-            raise
-    
+            logger.error(f"Failed to load model: {e}")
+            self.model = self._create_dummy_model()
+
+    def _create_dummy_model(self):
+        """Create a dummy model for testing when actual model is unavailable"""
+        logger.warning("Creating dummy model for testing")
+        model = models.resnet18(pretrained=True)
+        # Keep the original 1000 classes for dummy predictions
+        model.to(self.device)
+        model.eval()
+        return model
+
     def _load_classes(self):
         """Load class labels"""
         try:
-            with open(self.classes_path, 'r') as f:
-                self.classes = [line.strip() for line in f.readlines()]
-            self.logger.info(f"Loaded {len(self.classes)} classes")
+            self.classes = self._read_classes_file()
+            logger.info(f"Loaded {len(self.classes)} classes")
         except Exception as e:
-            self.logger.error(f"Failed to load classes: {e}")
-            # Default classes for Nigerian foods
-            self.classes = ['Akara', 'Bread', 'Egusi', 'Moi Moi', 'Rice and Stew', 'Yam']
-    
-    def _setup_transforms(self):
-        """Setup image transforms for inference"""
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
-    
-    async def predict(self, request: InferenceRequest) -> InferenceResult:
+            logger.error(f"Failed to load classes: {e}")
+            self.classes = [f"class_{i}" for i in range(1000)]  # Fallback for dummy model
+
+    def _read_classes_file(self) -> List[str]:
+        """Read classes from file"""
+        if not os.path.exists(self.classes_path):
+            # Try relative path
+            alt_path = os.path.join(os.path.dirname(__file__), '..', 'food_classes.txt')
+            if os.path.exists(alt_path):
+                self.classes_path = alt_path
+            else:
+                raise FileNotFoundError(f"Classes file not found: {self.classes_path}")
+
+        with open(self.classes_path, 'r') as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+
+    def preprocess_image(self, image_path: str) -> torch.Tensor:
         """
-        Perform model inference with caching
-        
+        Preprocess image for model inference
+
         Args:
-            request: Inference request
-        
+            image_path: Path to image file
+
         Returns:
-            InferenceResult with predictions
+            Preprocessed tensor
+        """
+        try:
+            image = Image.open(image_path).convert('RGB')
+            return self.transform(image).unsqueeze(0).to(self.device)
+        except Exception as e:
+            logger.error(f"Image preprocessing failed: {e}")
+            raise
+
+    def predict(self, image_path: str, top_k: int = 3) -> Dict[str, Any]:
+        """
+        Run model prediction on image
+
+        Args:
+            image_path: Path to image file
+            top_k: Number of top predictions to return
+
+        Returns:
+            Prediction results dictionary
         """
         start_time = time.time()
-        cache_hit = False
-        
+
         try:
-            # Check cache first
-            cache_key = self._generate_cache_key(request)
-            cached_result = self._get_cached_result(cache_key)
-            
-            if cached_result:
-                cache_hit = True
-                self.logger.info(f"Cache hit for request {request.request_id}")
-                return cached_result
-            
-            # Perform inference
-            if request.mode == InferenceMode.SINGLE:
-                result = await self._predict_single(request)
-            elif request.mode == InferenceMode.BATCH:
-                result = await self._predict_batch([request])
-            else:
-                result = await self._predict_single(request)  # Default to single
-            
-            result.cache_hit = cache_hit
-            result.processing_time = time.time() - start_time
-            
-            # Cache result
-            self._cache_result(cache_key, result)
-            
-            # Update metrics
-            self._update_metrics(result, cache_hit)
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Inference failed for request {request.request_id}: {e}")
-            self.metrics.error_rate = (self.metrics.error_rate + 1) / (self.metrics.total_inferences + 1)
-            
-            # Return error result
-            return InferenceResult(
-                request_id=request.request_id,
-                predictions=[],
-                confidence_scores=[],
-                processing_time=time.time() - start_time,
-                model_version=self.current_version,
-                cache_hit=cache_hit,
-                timestamp=datetime.now(),
-                metadata={'error': str(e)}
-            )
-    
-    async def _predict_single(self, request: InferenceRequest) -> InferenceResult:
-        """Perform single image inference"""
-        try:
-            # Load and preprocess image
-            image = self._preprocess_image(request.image_data)
-            
-            # Perform inference
+            # Preprocess image
+            input_tensor = self.preprocess_image(image_path)
+
+            # Run inference
             with torch.no_grad():
-                image = image.unsqueeze(0).to(self.device)
-                outputs = self.model(image)
-                probabilities = torch.nn.functional.softmax(outputs, dim=1)
-                confidence_scores, predicted_indices = torch.topk(probabilities, min(5, len(self.classes)))
-            
-            # Convert to lists
+                outputs = self.model(input_tensor)
+                probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+
+            # Get top k predictions
+            top_probabilities, top_class_indices = torch.topk(probabilities, min(top_k, len(probabilities)))
+
             predictions = []
-            confidences = confidence_scores.cpu().numpy()[0].tolist()
-            indices = predicted_indices.cpu().numpy()[0].tolist()
-            
-            for i, (idx, conf) in enumerate(zip(indices, confidences)):
+            for i in range(len(top_probabilities)):
+                class_idx = top_class_indices[i].item()
+                probability = top_probabilities[i].item()
+
+                # Handle class indexing for dummy vs real model
+                if len(self.classes) == 1000 and hasattr(self.model, 'fc') and self.model.fc.out_features != 1000:
+                    # This is a dummy model with ImageNet classes
+                    class_name = f"imagenet_class_{class_idx}"
+                else:
+                    class_name = self.classes[class_idx] if class_idx < len(self.classes) else f"class_{class_idx}"
+
                 predictions.append({
-                    'class': self.classes[idx],
-                    'confidence': float(conf),
-                    'class_index': int(idx),
-                    'rank': i + 1
+                    'class': class_name,
+                    'confidence': round(probability * 100, 2)
                 })
-            
-            return InferenceResult(
-                request_id=request.request_id,
-                predictions=predictions,
-                confidence_scores=confidences,
-                processing_time=0.0,  # Will be set by caller
-                model_version=self.current_version,
-                cache_hit=False,
-                timestamp=datetime.now(),
-                metadata={}
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Single prediction failed: {e}")
-            raise
-    
-    async def _predict_batch(self, requests: List[InferenceRequest]) -> List[InferenceResult]:
-        """Perform batch inference"""
-        try:
-            # Preprocess all images
-            images = []
-            for request in requests:
-                image = self._preprocess_image(request.image_data)
-                images.append(image)
-            
-            # Create batch
-            batch = torch.stack(images).to(self.device)
-            
-            # Perform batch inference
-            with torch.no_grad():
-                outputs = self.model(batch)
-                probabilities = torch.nn.functional.softmax(outputs, dim=1)
-                confidence_scores, predicted_indices = torch.topk(probabilities, min(5, len(self.classes)))
-            
-            # Process results
-            results = []
-            for i, request in enumerate(requests):
-                predictions = []
-                confidences = confidence_scores[i].cpu().numpy().tolist()
-                indices = predicted_indices[i].cpu().numpy().tolist()
-                
-                for j, (idx, conf) in enumerate(zip(indices, confidences)):
-                    predictions.append({
-                        'class': self.classes[idx],
-                        'confidence': float(conf),
-                        'class_index': int(idx),
-                        'rank': j + 1
-                    })
-                
-                results.append(InferenceResult(
-                    request_id=request.request_id,
-                    predictions=predictions,
-                    confidence_scores=confidences,
-                    processing_time=0.0,  # Will be set by caller
-                    model_version=self.current_version,
-                    cache_hit=False,
-                    timestamp=datetime.now(),
-                    metadata={}
-                ))
-            
-            return results
-            
-        except Exception as e:
-            self.logger.error(f"Batch prediction failed: {e}")
-            raise
-    
-    def _preprocess_image(self, image_data: bytes) -> torch.Tensor:
-        """Preprocess image for inference"""
-        try:
-            # Load image
-            image = Image.open(io.BytesIO(image_data))
-            
-            # Convert to RGB if necessary
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Apply transforms
-            tensor = self.transform(image)
-            
-            return tensor
-            
-        except Exception as e:
-            self.logger.error(f"Image preprocessing failed: {e}")
-            raise
-    
-    def _generate_cache_key(self, request: InferenceRequest) -> str:
-        """Generate cache key for request"""
-        # Create hash of image data and request parameters
-        image_hash = hashlib.md5(request.image_data).hexdigest()
-        key_data = f"{image_hash}:{request.model_version}:{request.mode.value}"
-        return hashlib.sha256(key_data.encode()).hexdigest()
-    
-    def _get_cached_result(self, cache_key: str) -> Optional[InferenceResult]:
-        """Get cached result if valid"""
-        if cache_key in self.result_cache:
-            cached_item = self.result_cache[cache_key]
-            if datetime.now() - cached_item['timestamp'] < self.cache_ttl:
-                return cached_item['result']
-            else:
-                # Remove expired cache entry
-                del self.result_cache[cache_key]
-        return None
-    
-    def _cache_result(self, cache_key: str, result: InferenceResult):
-        """Cache inference result"""
-        try:
-            # Check cache size limit
-            if len(self.result_cache) >= self.max_cache_size:
-                # Remove oldest entry
-                oldest_key = min(self.result_cache.keys(), 
-                               key=lambda k: self.result_cache[k]['timestamp'])
-                del self.result_cache[oldest_key]
-            
-            # Add new entry
-            self.result_cache[cache_key] = {
-                'result': result,
-                'timestamp': datetime.now()
+
+            processing_time = time.time() - start_time
+
+            result = {
+                'predictions': predictions,
+                'top_prediction': predictions[0] if predictions else None,
+                'processing_time': round(processing_time, 3),
+                'model_version': 'v1.0',
+                'timestamp': time.time(),
+                'cached': False  # Will be set to True by cache manager
             }
-            
+
+            logger.info(f"Prediction completed in {processing_time:.3f}s")
+            return result
+
         except Exception as e:
-            self.logger.error(f"Failed to cache result: {e}")
-    
-    def _update_metrics(self, result: InferenceResult, cache_hit: bool):
-        """Update performance metrics"""
-        try:
-            self.metrics.total_inferences += 1
-            
-            # Update average processing time (excluding cache hits)
-            if not cache_hit:
-                total_time = self.metrics.avg_processing_time * (self.metrics.total_inferences - 1)
-                self.metrics.avg_processing_time = (total_time + result.processing_time) / self.metrics.total_inferences
-            
-            # Update cache hit rate
-            if cache_hit:
-                self.metrics.cache_hit_rate = (self.metrics.cache_hit_rate * (self.metrics.total_inferences - 1) + 1) / self.metrics.total_inferences
-            else:
-                self.metrics.cache_hit_rate = self.metrics.cache_hit_rate * (self.metrics.total_inferences - 1) / self.metrics.total_inferences
-            
-            # Update memory usage
-            if torch.cuda.is_available():
-                self.metrics.memory_usage_mb = torch.cuda.memory_allocated() / (1024**2)
-                self.metrics.gpu_utilization = torch.cuda.utilization() if hasattr(torch.cuda, 'utilization') else 0.0
-            
-            self.metrics.last_updated = datetime.now()
-            
-        except Exception as e:
-            self.logger.error(f"Failed to update metrics: {e}")
-    
-    async def update_model(self, new_model_path: str, new_version: str):
-        """Update model with new version"""
-        try:
-            self.logger.info(f"Updating model to version {new_version}")
-            self.status = ModelStatus.UPDATING
-            
-            # Load new model
-            new_model = torch.load(new_model_path, map_location=self.device)
-            new_model.eval()
-            new_model.to(self.device)
-            
-            # Test new model
-            test_image = torch.randn(1, 3, 224, 224).to(self.device)
-            with torch.no_grad():
-                _ = new_model(test_image)
-            
-            # Swap models
-            old_model = self.model
-            self.model = new_model
-            self.current_version = new_version
-            self.status = ModelStatus.READY
-            
-            # Clear cache since model changed
-            self.result_cache.clear()
-            
-            # Update metrics
-            self.metrics.model_version = new_version
-            self.metrics.last_updated = datetime.now()
-            
-            self.logger.info(f"Model updated successfully to version {new_version}")
-            
-            # Clean up old model
-            del old_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-        except Exception as e:
-            self.logger.error(f"Model update failed: {e}")
-            self.status = ModelStatus.ERROR
-            raise
-    
-    def get_metrics(self) -> ModelMetrics:
-        """Get current model metrics"""
-        return self.metrics
-    
-    def get_status(self) -> Dict[str, Any]:
-        """Get model status information"""
+            logger.error(f"Prediction failed: {e}")
+            processing_time = time.time() - start_time
+            return {
+                'error': 'Prediction failed',
+                'processing_time': round(processing_time, 3),
+                'predictions': [],
+                'cached': False
+            }
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get model information"""
         return {
-            'status': self.status.value,
-            'model_version': self.current_version,
+            'model_type': 'ResNet18',
+            'num_classes': len(self.classes),
+            'classes': self.classes,
             'device': str(self.device),
-            'classes_count': len(self.classes),
-            'cache_size': len(self.result_cache),
-            'metrics': asdict(self.metrics)
+            'model_path': self.model_path,
+            'classes_path': self.classes_path,
+            'xai_available': XAI_AVAILABLE and self.explainer is not None
         }
     
-    def clear_cache(self):
-        """Clear inference cache"""
-        self.result_cache.clear()
-        self.logger.info("Inference cache cleared")
-    
-    def optimize_performance(self):
-        """Optimize model performance"""
+    def predict_with_explanation(self, image_path: str, methods: List[str] = None, 
+                             top_k: int = 3) -> Dict[str, Any]:
+        """
+        Run model prediction with XAI explanations
+        
+        Args:
+            image_path: Path to image file
+            methods: List of XAI methods to use (grad-cam, shap, lime, feature-importance)
+            top_k: Number of top predictions to return
+            
+        Returns:
+            Prediction results with explanations
+        """
+        if not XAI_AVAILABLE or self.explainer is None:
+            return self.predict(image_path, top_k)
+        
+        start_time = time.time()
+        
         try:
-            # Enable model optimization
-            if hasattr(self.model, 'eval'):
-                self.model.eval()
+            # Get basic prediction
+            prediction_result = self.predict(image_path, top_k)
             
-            # Compile model for better performance (PyTorch 2.0+)
-            if hasattr(torch, 'compile') and torch.cuda.is_available():
+            if 'error' in prediction_result:
+                return prediction_result
+            
+            # Preprocess image for XAI
+            input_tensor = self.preprocess_image(image_path)
+            
+            # Get model outputs for XAI
+            with torch.no_grad():
+                outputs = self.model(input_tensor)
+                probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+                predicted_class = torch.argmax(probabilities).item()
+                confidence = probabilities[predicted_class].item()
+            
+            # Default methods if not specified
+            if methods is None:
+                methods = ['grad-cam', 'feature-importance']
+            
+            explanations = {}
+            
+            # Generate explanations for each method
+            for method in methods:
                 try:
-                    self.model = torch.compile(self.model)
-                    self.logger.info("Model compiled for better performance")
+                    if method == 'grad-cam':
+                        heatmap = self.explainer.generate_grad_cam(input_tensor, predicted_class)
+                        original_image = Image.open(image_path).convert('RGB')
+                        overlay_image = self.explainer.create_explanation_overlay(
+                            original_image, heatmap, confidence
+                        )
+                        heatmap_base64 = self.explainer.encode_image_to_base64(overlay_image)
+                        
+                        explanations[method] = {
+                            'heatmap_overlay': f'data:image/png;base64,{heatmap_base64}',
+                            'explanation': f'Grad-CAM highlights regions important for {self.classes[predicted_class] if predicted_class < len(self.classes) else f"Class_{predicted_class}"}'
+                        }
+                    
+                    elif method == 'shap':
+                        shap_result = self.explainer.generate_shap_values(input_tensor, predicted_class)
+                        if 'error' not in shap_result:
+                            explanations[method] = shap_result
+                    
+                    elif method == 'lime':
+                        lime_result = self.explainer.generate_lime_explanation(input_tensor, predicted_class)
+                        if 'error' not in lime_result:
+                            explanations[method] = lime_result
+                    
+                    elif method == 'feature-importance':
+                        importance = self.explainer.generate_feature_importance(input_tensor, 10)
+                        explanations[method] = {
+                            'feature_importance': importance,
+                            'explanation': 'Feature importance using integrated gradients'
+                        }
+                    
+                    elif method == 'confidence':
+                        confidence_data = self.explainer.generate_confidence_explanation(
+                            probabilities, self.classes
+                        )
+                        explanations[method] = confidence_data
+                    
                 except Exception as e:
-                    self.logger.warning(f"Model compilation failed: {e}")
+                    logger.warning(f"Failed to generate {method} explanation: {e}")
+                    explanations[method] = {'error': str(e)}
             
-            # Optimize memory usage
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                self.logger.info("GPU memory optimized")
+            # Add explanations to prediction result
+            prediction_result['explanations'] = explanations
+            prediction_result['xai_methods_used'] = methods
+            prediction_result['processing_time'] = round(time.time() - start_time, 3)
+            
+            return prediction_result
             
         except Exception as e:
-            self.logger.error(f"Performance optimization failed: {e}")
+            logger.error(f"Prediction with explanation failed: {e}")
+            return {
+                'error': 'Prediction with explanation failed',
+                'processing_time': round(time.time() - start_time, 3),
+                'predictions': []
+            }
+    
+    def generate_explanation_visualization(self, image_path: str, method: str = 'grad-cam') -> str:
+        """
+        Generate visualization for a specific XAI method
+        
+        Args:
+            image_path: Path to image file
+            method: XAI method to visualize
+            
+        Returns:
+            Base64 encoded image string
+        """
+        if not XAI_AVAILABLE or self.explainer is None or self.visualizer is None:
+            return ""
+        
+        try:
+            # Preprocess image
+            input_tensor = self.preprocess_image(image_path)
+            
+            # Get prediction
+            with torch.no_grad():
+                outputs = self.model(input_tensor)
+                probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+                predicted_class = torch.argmax(probabilities).item()
+            
+            # Generate explanation based on method
+            if method == 'grad-cam':
+                heatmap = self.explainer.generate_grad_cam(input_tensor, predicted_class)
+                original_image = Image.open(image_path).convert('RGB')
+                overlay_image = self.explainer.create_explanation_overlay(
+                    original_image, heatmap, probabilities[predicted_class].item()
+                )
+                return self.explainer.encode_image_to_base64(overlay_image)
+            
+            elif method == 'shap':
+                shap_result = self.explainer.generate_shap_values(input_tensor, predicted_class)
+                return shap_result.get('shap_image', '')
+            
+            elif method == 'lime':
+                lime_result = self.explainer.generate_lime_explanation(input_tensor, predicted_class)
+                return lime_result.get('lime_image', '')
+            
+            elif method == 'feature-importance':
+                importance = self.explainer.generate_feature_importance(input_tensor, 10)
+                if self.visualizer:
+                    return self.visualizer.create_feature_importance_plot(
+                        importance, title=f"Feature Importance - {method}", method=method
+                    )
+            
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Failed to generate {method} visualization: {e}")
+            return ""
+    
+    def get_xai_capabilities(self) -> Dict[str, Any]:
+        """Get information about available XAI capabilities"""
+        capabilities = {
+            'xai_available': XAI_AVAILABLE and self.explainer is not None,
+            'available_methods': [],
+            'performance_info': {}
+        }
+        
+        if XAI_AVAILABLE and self.explainer is not None:
+            capabilities['available_methods'] = [
+                {
+                    'name': 'grad-cam',
+                    'description': 'Gradient-weighted Class Activation Mapping',
+                    'type': 'visualization',
+                    'speed': 'fast'
+                },
+                {
+                    'name': 'shap',
+                    'description': 'SHapley Additive exPlanations',
+                    'type': 'pixel-level',
+                    'speed': 'slow'
+                },
+                {
+                    'name': 'lime',
+                    'description': 'Local Interpretable Model-agnostic Explanations',
+                    'type': 'region-level',
+                    'speed': 'medium'
+                },
+                {
+                    'name': 'feature-importance',
+                    'description': 'Integrated Gradients Feature Importance',
+                    'type': 'feature-level',
+                    'speed': 'medium'
+                },
+                {
+                    'name': 'confidence',
+                    'description': 'Prediction Confidence Analysis',
+                    'type': 'statistical',
+                    'speed': 'fast'
+                }
+            ]
+            
+            capabilities['performance_info'] = {
+                'recommended_methods': {
+                    'speed': 'grad-cam',
+                    'accuracy': 'shap',
+                    'interpretability': 'shap',
+                    'balance': 'lime'
+                },
+                'memory_requirements': {
+                    'grad-cam': 'low',
+                    'shap': 'high',
+                    'lime': 'medium',
+                    'feature-importance': 'medium'
+                }
+            }
+        
+        return capabilities
 
-# Utility functions
-def create_inference_request(image_data: bytes, user_id: str = None, 
-                           mode: InferenceMode = InferenceMode.SINGLE) -> InferenceRequest:
-    """Create inference request"""
-    return InferenceRequest(
-        request_id=f"req_{int(time.time() * 1000)}",
-        image_data=image_data,
-        model_version="1.0.0",
-        mode=mode,
-        timestamp=datetime.now(),
-        user_id=user_id,
-        metadata={}
-    )
 
 # Global model inference instance
-model_inference = None
-
-def get_model_inference() -> ModelInference:
-    """Get global model inference instance"""
-    global model_inference
-    if not model_inference:
-        model_inference = ModelInference()
-    return model_inference
+model_inference = ModelInference()

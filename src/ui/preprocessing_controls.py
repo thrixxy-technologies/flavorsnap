@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core.image_enhancer import ImageEnhancer
+from src.utils.optimization_suggester import get_optimization_suggestions
 
 
 class PreprocessingControls(param.Parameterized):
@@ -34,6 +35,7 @@ class PreprocessingControls(param.Parameterized):
     
     # Callbacks
     on_image_update = param.Callable(default=None)
+    on_realtime_update = param.Callable(default=None)  # New callback for real-time updates
     
     def __init__(self, **params):
         super().__init__(**params)
@@ -139,6 +141,24 @@ class PreprocessingControls(param.Parameterized):
         # Parameters display
         self.params_text = pn.pane.Markdown("### Current Parameters\nNo image loaded")
         
+        # Real-time toggle
+        self.realtime_toggle = pn.widgets.Checkbox(
+            name='🔄 Real-time Updates',
+            value=True,
+            width=200
+        )
+        
+        # Optimization suggestions display
+        self.suggestions_text = pn.pane.Markdown("### 💡 Optimization Suggestions\nNo image loaded")
+        
+        # Auto-apply suggestions button
+        self.auto_apply_button = pn.widgets.Button(
+            name='✨ Auto-Apply',
+            button_type='primary',
+            width=120,
+            visible=False
+        )
+        
         # Setup event handlers
         self.brightness_slider.param.watch(self._on_brightness_change, 'value')
         self.contrast_slider.param.watch(self._on_contrast_change, 'value')
@@ -151,6 +171,10 @@ class PreprocessingControls(param.Parameterized):
         self.crop_y.param.watch(self._on_crop_change, 'value')
         self.crop_width.param.watch(self._on_crop_change, 'value')
         self.crop_height.param.watch(self._on_crop_change, 'value')
+        
+        # Real-time and optimization handlers
+        self.realtime_toggle.param.watch(self._on_realtime_toggle, 'value')
+        self.auto_apply_button.on_click(self._on_auto_apply_suggestions)
     
     def load_image(self, image: Image.Image) -> None:
         """Load an image for preprocessing."""
@@ -171,6 +195,9 @@ class PreprocessingControls(param.Parameterized):
         # Update status
         self._update_status("Image loaded successfully")
         self._update_parameters()
+        
+        # Generate optimization suggestions
+        self._update_optimization_suggestions()
     
     def _on_brightness_change(self, event):
         """Handle brightness change."""
@@ -281,6 +308,11 @@ class PreprocessingControls(param.Parameterized):
         self._notify_update()
         self._update_status("Enhancements applied")
         self._update_parameters()
+        
+        # Trigger real-time update if enabled
+        if self.realtime_toggle.value and self.on_realtime_update:
+            preprocessing_params = self.get_enhancement_params()
+            self.on_realtime_update(self.current_image, preprocessing_params)
     
     def _reset_to_original(self):
         """Reset to original image."""
@@ -339,6 +371,89 @@ class PreprocessingControls(param.Parameterized):
         """Get current enhancement parameters."""
         return self.enhancer.get_enhancement_params()
     
+    def _on_realtime_toggle(self, event):
+        """Handle real-time toggle change."""
+        enabled = event.new
+        status = "enabled" if enabled else "disabled"
+        self._update_status(f"Real-time updates {status}")
+        
+        # Trigger update if enabling and image is loaded
+        if enabled and self.current_image and self.on_realtime_update:
+            preprocessing_params = self.get_enhancement_params()
+            self.on_realtime_update(self.current_image, preprocessing_params)
+    
+    def _update_optimization_suggestions(self):
+        """Update optimization suggestions based on current image."""
+        if not self.original_image:
+            return
+        
+        try:
+            current_params = self.get_enhancement_params()
+            suggestions = get_optimization_suggestions(self.original_image, current_params)
+            
+            if suggestions:
+                suggestions_text = "### 💡 Optimization Suggestions\n\n"
+                high_priority_count = 0
+                
+                for i, suggestion in enumerate(suggestions[:5], 1):  # Show top 5
+                    priority_emoji = {'high': '🔴', 'medium': '🟡', 'low': '🟢'}[suggestion.priority]
+                    impact_emoji = {'significant': '💥', 'moderate': '⚡', 'minimal': '✨'}[suggestion.estimated_impact]
+                    
+                    suggestions_text += f"{i}. {priority_emoji} **{suggestion.type.value.title()}** {impact_emoji}\n"
+                    suggestions_text += f"   - {suggestion.reason}\n"
+                    suggestions_text += f"   - Est. improvement: {suggestion.confidence_improvement*100:.1f}%\n\n"
+                    
+                    if suggestion.priority == 'high':
+                        high_priority_count += 1
+                
+                self.suggestions_text.object = suggestions_text
+                self.auto_apply_button.visible = high_priority_count > 0
+            else:
+                self.suggestions_text.object = "### 💡 Optimization Suggestions\n\nNo suggestions - image looks good!"
+                self.auto_apply_button.visible = False
+                
+        except Exception as e:
+            self.suggestions_text.object = f"### 💡 Optimization Suggestions\n\nError generating suggestions: {str(e)}"
+            self.auto_apply_button.visible = False
+    
+    def _on_auto_apply_suggestions(self, event):
+        """Handle auto-apply suggestions button click."""
+        if not self.original_image:
+            return
+        
+        try:
+            current_params = self.get_enhancement_params()
+            suggestions = get_optimization_suggestions(self.original_image, current_params)
+            
+            # Apply high-priority suggestions
+            applied_count = 0
+            for suggestion in suggestions:
+                if suggestion.priority == 'high':
+                    if hasattr(self, f"_{suggestion.type.value}_slider"):
+                        slider = getattr(self, f"_{suggestion.type.value}_slider")
+                        slider.value = suggestion.suggested_value
+                        applied_count += 1
+                    elif suggestion.type.value == 'aspect_ratio':
+                        self.aspect_ratio_select.value = suggestion.suggested_value
+                        applied_count += 1
+            
+            # Update suggestions after applying
+            self._update_optimization_suggestions()
+            
+            # Show feedback
+            self._update_status(f"Applied {applied_count} high-priority suggestions")
+            
+        except Exception as e:
+            self._update_status(f"Error applying suggestions: {str(e)}")
+    
+    def set_realtime_callback(self, callback: Callable):
+        """Set the real-time update callback."""
+        self.on_realtime_update = callback
+    
+    def is_realtime_enabled(self) -> bool:
+        """Check if real-time updates are enabled."""
+        return self.realtime_toggle.value
+    
     def create_layout(self) -> pn.Column:
         """Create the Panel layout for the controls."""
         # Basic adjustments
@@ -366,6 +481,14 @@ class PreprocessingControls(param.Parameterized):
         action_buttons = pn.Row(
             self.reset_button,
             self.auto_enhance_button,
+            self.auto_apply_button,
+            spacing=10
+        )
+        
+        # Real-time controls
+        realtime_controls = pn.Column(
+            pn.pane.Markdown("### 🔄 Real-time Settings"),
+            self.realtime_toggle,
             spacing=10
         )
         
@@ -376,15 +499,23 @@ class PreprocessingControls(param.Parameterized):
             spacing=10
         )
         
+        # Suggestions panel
+        suggestions_panel = pn.Column(
+            self.suggestions_text,
+            spacing=10
+        )
+        
         # Main layout
         layout = pn.Column(
             pn.pane.Markdown("## 🖼️ Image Preprocessing Controls"),
+            realtime_controls,
             basic_controls,
             crop_controls,
             action_buttons,
+            suggestions_panel,
             info_panel,
             sizing_mode='stretch_width',
-            max_width=400
+            max_width=450
         )
         
         return layout

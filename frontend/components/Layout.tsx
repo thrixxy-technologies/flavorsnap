@@ -1,4 +1,4 @@
-import { ReactNode, useState } from 'react';
+import React, { ReactNode, useState, useEffect } from 'react';
 import Head from 'next/head';
 import { useTranslation } from 'next-i18next';
 import { useTheme } from './ThemeProvider';
@@ -17,6 +17,18 @@ const Layout = ({ children, title, description }: LayoutProps) => {
   const { theme, toggleTheme } = useTheme();
 
   const toggleSidebar = () => setIsSidebarOpen(!isSidebarOpen);
+
+  // Close sidebar on Escape key
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isSidebarOpen) {
+        setIsSidebarOpen(false);
+      }
+    };
+    
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [isSidebarOpen]);
 
   const ThemeToggleButton = () => (
     <button
@@ -101,7 +113,66 @@ const Layout = ({ children, title, description }: LayoutProps) => {
         </div>
       </header>
 
-      <div className="flex">
+      {/* Mobile Sidebar Overlay */}
+      {isSidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Mobile Sidebar */}
+      <aside className={`
+        fixed top-0 left-0 h-full w-64 bg-white dark:bg-gray-900 shadow-2xl z-50
+        transform transition-transform duration-300 ease-in-out lg:hidden
+        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
+        <div className="p-4">
+          <div className="flex items-center justify-between mb-8">
+            <span className="text-2xl font-bold text-accent">FlavorSnap 🍛</span>
+            <button
+              onClick={() => setIsSidebarOpen(false)}
+              className="p-2 rounded-md hover:bg-muted focus:outline-none focus:ring-2 focus:ring-accent"
+              aria-label="Close menu"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <nav className="space-y-4">
+            <a 
+              href="/" 
+              className="block py-3 px-4 text-lg font-medium text-accent bg-accent/10 rounded-lg"
+              onClick={() => setIsSidebarOpen(false)}
+            >
+              Home
+            </a>
+            <a 
+              href="/blockchain" 
+              className="block py-3 px-4 text-lg font-medium hover:text-accent hover:bg-muted rounded-lg transition-colors"
+              onClick={() => setIsSidebarOpen(false)}
+            >
+              Blockchain
+            </a>
+            <a 
+              href="/about" 
+              className="block py-3 px-4 text-lg font-medium hover:text-accent hover:bg-muted rounded-lg transition-colors"
+              onClick={() => setIsSidebarOpen(false)}
+            >
+              About
+            </a>
+            <a 
+              href="/contact" 
+              className="block py-3 px-4 text-lg font-medium hover:text-accent hover:bg-muted rounded-lg transition-colors"
+              onClick={() => setIsSidebarOpen(false)}
+            >
+              Contact
+            </a>
+          </nav>
+        </div>
+      </aside>
         {/* Main Content Area */}
         <main className="flex-1">
           {/* Ensure children also respect the background variable */}

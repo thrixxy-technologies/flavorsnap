@@ -1,0 +1,147 @@
+# Production Environment Configuration
+app:
+  name: "FlavorSnap"
+  version: "2.0.0"
+  environment: "production"
+  debug: false
+  hot_reload: false
+  log_level: "INFO"
+  
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  reload: false
+  access_log: true
+  
+database:
+  host: "${DB_HOST}"
+  port: "${DB_PORT:5432}"
+  name: "${DB_NAME}"
+  username: "${DB_USERNAME}"
+  password: "${DB_PASSWORD}"
+  pool_size: 20
+  max_overflow: 30
+  echo: false
+  ssl_mode: "require"
+  
+redis:
+  host: "${REDIS_HOST}"
+  port: "${REDIS_PORT:6379}"
+  db: 0
+  password: "${REDIS_PASSWORD}"
+  ssl: true
+  max_connections: 50
+  
+ml:
+  model_path: "/app/models/best_model.pth"
+  classes_path: "/app/data/food_classes.txt"
+  confidence_threshold: 0.8
+  batch_size: 64
+  device: "cuda"
+  model_version: "v2.1"
+  
+upload:
+  max_file_size: 52428800  # 50MB
+  upload_dir: "/app/uploads"
+  allowed_types: ["jpg", "jpeg", "png", "gif", "webp"]
+  temp_dir: "/tmp"
+  cleanup_interval: 1800  # 30 minutes
+  
+cache:
+  enabled: true
+  backend: "redis"
+  ttl: 7200  # 2 hours
+  max_size: 10000
+  
+security:
+  jwt_secret: "${JWT_SECRET}"
+  jwt_expiration: 1800  # 30 minutes
+  bcrypt_rounds: 12
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+  cors:
+    enabled: true
+    origins: ["https://flavorsnap.com", "https://www.flavorsnap.com"]
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    headers: ["Content-Type", "Authorization", "X-API-Key"]
+    
+logging:
+  level: "INFO"
+  format: "json"
+  handlers: ["file", "elasticsearch"]
+  file_path: "/app/logs/app.log"
+  max_file_size: 52428800  # 50MB
+  backup_count: 10
+  elasticsearch:
+    enabled: true
+    hosts: ["${ELASTICSEARCH_HOSTS}"]
+    index_prefix: "flavorsnap-logs"
+    
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  health_check_interval: 15
+  prometheus:
+    enabled: true
+    port: 9091
+  datadog:
+    enabled: true
+    api_key: "${DATADOG_API_KEY}"
+    app_key: "${DATADOG_APP_KEY}"
+  
+features:
+  ml_classification: true
+  blockchain_integration: true
+  analytics: true
+  cache_enabled: true
+  rate_limiting: true
+  hot_reload: false
+  
+external_services:
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-4"
+    max_tokens: 2000
+  aws:
+    access_key: "${AWS_ACCESS_KEY_ID}"
+    secret_key: "${AWS_SECRET_ACCESS_KEY}"
+    region: "${AWS_REGION}"
+    s3_bucket: "flavorsnap-prod"
+    cloudfront_domain: "${CLOUDFRONT_DOMAIN}"
+  sentry:
+    dsn: "${SENTRY_DSN}"
+    environment: "production"
+    sample_rate: 0.1
+    
+performance:
+  connection_timeout: 10
+  read_timeout: 30
+  write_timeout: 30
+  max_concurrent_requests: 500
+  
+validation:
+  strict_mode: true
+  auto_fix: false
+  validate_on_load: true
+  
+version_control:
+  enabled: true
+  track_changes: true
+  backup_configs: true
+  max_versions: 50
+  
+security_hardening:
+  https_only: true
+  hsts_enabled: true
+  csrf_protection: true
+  xss_protection: true
+  content_security_policy: true
+  
+backup:
+  enabled: true
+  interval: 86400  # 24 hours
+  retention_days: 30
+  s3_backup: true
+  backup_bucket: "${BACKUP_BUCKET}"

@@ -1,0 +1,17 @@
+﻿apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: ml-model-api
+spec:
+  hosts:
+  - ml-model-api
+  http:
+  - route:
+    - destination:
+        host: ml-model-api
+        subset: v1
+      weight: 90
+    - destination:
+        host: ml-model-api
+        subset: v2
+      weight: 10

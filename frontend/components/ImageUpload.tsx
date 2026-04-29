@@ -1,33 +1,17 @@
-import { useRef, useState, useCallback, DragEvent, ChangeEvent, TouchEvent, useEffect } from 'react';
+import { useRef, useState, useCallback, DragEvent, ChangeEvent, TouchEvent, KeyboardEvent } from 'react';
 import { useTranslation } from 'next-i18next';
-import { 
-  ImageUploadProps, 
-  ImageUploadState, 
-  ImageUploadProgress, 
-  EXIFData, 
-  BlurPlaceholder,
-  UploadResponse,
-  UploadError
-} from '../types';
-import { api } from '../utils/api';
+import { AppError } from '../types';
 
-export function ImageUpload({ 
-  onImageSelect, 
-  onUploadProgress,
-  onUploadComplete,
-  onUploadError,
-  loading = false, 
-  disabled = false,
-  maxSize = 10 * 1024 * 1024, // 10MB
-  acceptedFormats = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic'],
-  enableChunkedUpload = true,
-  chunkSize = 1024 * 1024, // 1MB chunks
-  showProgress = true,
-  showPreview = true,
-  showEXIF = true,
-  enableBlurUp = true,
-  accessibility
-}: ImageUploadProps) {
+interface ImageUploadProps {
+  onImageSelect: (file: File, imageUrl: string) => void;
+  onError?: (error: AppError) => void;
+  loading?: boolean;
+  disabled?: boolean;
+  uploadProgress?: number; // Progress percentage (0-100)
+  uploadStatus?: string; // Current status of the upload/async operation
+}
+
+export function ImageUpload({ onImageSelect, onError, loading = false, disabled = false, uploadProgress, uploadStatus }: ImageUploadProps) {
   const { t } = useTranslation('common');
   const [isDragging, setIsDragging] = useState(false);
   const [isTouching, setIsTouching] = useState(false);
@@ -329,94 +313,18 @@ export function ImageUpload({
       uploadId: null
     });
 
-    try {
-      uploadControllerRef.current = new AbortController();
-
-      // Generate blur placeholder and extract EXIF data
-      const [blur, exif] = await Promise.all([
-        generateBlurPlaceholder(file),
-        extractEXIFData(file)
-      ]);
-
-      setBlurPlaceholder(blur);
-      setExifData(exif);
-
-      // Choose upload method
-      const shouldUseChunkedUpload = enableChunkedUpload && file.size > 5 * 1024 * 1024; // 5MB threshold
-      const response = shouldUseChunkedUpload ? await uploadInChunks(file) : await uploadFile(file);
-
-      setUploadState(prev => ({
-        ...prev,
-        isUploading: false,
-        progress: {
-          ...prev.progress,
-          percentage: 100
-        }
-      }));
-
-      onUploadComplete?.(response);
-
-    } catch (error) {
-      const errorMessage = error instanceof UploadError ? error.message : t('upload_failed');
-      
-      setUploadState(prev => ({
-        ...prev,
-        isUploading: false,
-        error: errorMessage
-      }));
-
-      onUploadError?.(errorMessage);
+  const getStatusMessage = (status?: string) => {
+    if (!status) return t('processing');
+    switch (status) {
+      case 'starting': return t('status_starting', 'Starting...');
+      case 'uploading': return t('status_uploading', 'Uploading image...');
+      case 'processing': return t('status_processing', 'Analyzing food...');
+      case 'complete': return t('status_complete', 'Analysis complete!');
+      case 'cached': return t('status_cached', 'Retrieved from cache');
+      default: return t('status_processing', 'Processing...');
     }
-  }, [validateFile, generateBlurPlaceholder, extractEXIFData, enableChunkedUpload, uploadInChunks, uploadFile, onUploadComplete, onUploadError, chunkSize, t]);
+  };
 
-  // Pause/Resume upload
-  const togglePauseUpload = useCallback(() => {
-    if (uploadControllerRef.current) {
-      uploadControllerRef.current.abort();
-      uploadControllerRef.current = null;
-      
-      setUploadState(prev => ({
-        ...prev,
-        isPaused: true,
-        isUploading: false
-      }));
-    } else {
-      // Resume upload
-      if (uploadState.file) {
-        handleUpload(uploadState.file);
-      }
-    }
-  }, [uploadState.file, handleUpload]);
-
-  // Cancel upload
-  const cancelUpload = useCallback(() => {
-    if (uploadControllerRef.current) {
-      uploadControllerRef.current.abort();
-      uploadControllerRef.current = null;
-    }
-
-    setUploadState({
-      file: null,
-      preview: null,
-      progress: {
-        loaded: 0,
-        total: 0,
-        percentage: 0,
-        speed: 0,
-        estimatedTimeRemaining: 0,
-        chunks: { completed: 0, total: 0, size: chunkSize }
-      },
-      isUploading: false,
-      isPaused: false,
-      error: null,
-      uploadId: null
-    });
-
-    setBlurPlaceholder(null);
-    setExifData(null);
-  }, [chunkSize]);
-
-  // Drag and drop handlers
   const handleDragEnter = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -455,9 +363,14 @@ export function ImageUpload({
         handleUpload(file);
         const imageUrl = URL.createObjectURL(file);
         onImageSelect(file, imageUrl);
+      } else {
+        onError?.({
+          message: t('error_invalid_image_type', 'Invalid file type. Please upload an image.'),
+          code: 'INVALID_FILE_TYPE'
+        });
       }
     }
-  }, [handleUpload, onImageSelect, disabled, loading]);
+  }, [onImageSelect, onError, disabled, loading, t]);
 
   const handleTouchStart = useCallback((e: TouchEvent<HTMLDivElement>) => {
     if (disabled || loading) return;
@@ -477,13 +390,18 @@ export function ImageUpload({
         handleUpload(file);
         const imageUrl = URL.createObjectURL(file);
         onImageSelect(file, imageUrl);
+      } else {
+        onError?.({
+          message: t('error_invalid_image_type', 'Invalid file type. Please upload an image.'),
+          code: 'INVALID_FILE_TYPE'
+        });
       }
     }
     // Reset input value to allow selecting the same file again
     if (e.target) {
       e.target.value = '';
     }
-  }, [handleUpload, onImageSelect]);
+  }, [onImageSelect, onError, t]);
 
   const handleClick = useCallback(() => {
     if (!disabled && !loading) {
@@ -491,17 +409,26 @@ export function ImageUpload({
     }
   }, [disabled, loading]);
 
-  // Cleanup
-  useEffect(() => {
-    return () => {
-      if (uploadControllerRef.current) {
-        uploadControllerRef.current.abort();
+  const handleKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
+    if (disabled || loading) return;
+    
+    // Support Enter and Space keys for activation
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleClick();
+    }
+    
+    // Support Escape key to blur focus
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (fileInputRef.current) {
+        fileInputRef.current.blur();
       }
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
-      }
-    };
-  }, []);
+      e.currentTarget.blur();
+    }
+    
+    // Allow default Tab behavior for navigation
+  }, [disabled, loading, handleClick]);
 
   return (
     <div className="w-full max-w-md mx-auto px-4 sm:px-0">
@@ -525,14 +452,14 @@ export function ImageUpload({
         onTouchEnd={handleTouchEnd}
         onClick={handleClick}
         role="button"
-        tabIndex={0}
-        aria-label={accessibility?.ariaLabel || t('upload_image_area')}
-        aria-describedby={accessibility?.ariaDescription}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            handleClick();
-          }
-        }}
+        tabIndex={disabled ? -1 : 0}
+        aria-label={t('upload_image_area', 'Image upload area')}
+        aria-describedby={uploadProgress !== undefined && uploadProgress > 0 && uploadProgress < 100 ? 'upload-progress' : undefined}
+        aria-disabled={disabled || loading}
+        aria-pressed={isDragging}
+        aria-busy={loading}
+        onKeyDown={handleKeyDown}
+        data-testid="image-upload-drop-zone"
       >
         <input
           ref={fileInputRef}
@@ -542,6 +469,7 @@ export function ImageUpload({
           className="hidden"
           disabled={disabled || loading}
           aria-label={t('select_image_file')}
+          tabIndex={-1} // Hide from tab order since parent is focusable
         />
         
         {!uploadState.file ? (
@@ -575,147 +503,84 @@ export function ImageUpload({
               </p>
             </div>
           </div>
-        ) : (
-          <div className="w-full">
-            {showPreview && uploadState.preview && (
-              <div className="mb-4">
-                <div className="relative inline-block">
-                  {/* Blur placeholder */}
-                  {blurPlaceholder && (
-                    <div 
-                      className="absolute inset-0 blur-sm transition-opacity duration-300"
-                      style={{
-                        backgroundImage: `url(${blurPlaceholder.dataUrl})`,
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
-                        filter: 'blur(10px)',
-                        transform: 'scale(1.1)'
-                      }}
-                    />
-                  )}
-                  <img
-                    src={uploadState.preview}
-                    alt={t('uploaded_image_preview')}
-                    className="max-w-full max-h-48 rounded-lg shadow-md relative z-10"
-                    onLoad={() => {
-                      // Fade in the actual image
-                      const img = event?.target as HTMLImageElement;
-                      if (img) {
-                        img.style.opacity = '0';
-                        setTimeout(() => {
-                          img.style.transition = 'opacity 0.3s ease-in-out';
-                          img.style.opacity = '1';
-                        }, 100);
-                      }
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* EXIF Data */}
-            {showEXIF && exifData && (
-              <div className="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-xs">
-                <h4 className="font-semibold mb-2">{t('image_details')}</h4>
-                <div className="grid grid-cols-2 gap-2 text-gray-600 dark:text-gray-400">
-                  {exifData.imageWidth && (
-                    <div>{t('dimensions')}: {exifData.imageWidth} × {exifData.imageHeight}</div>
-                  )}
-                  {exifData.make && (
-                    <div>{t('camera')}: {exifData.make} {exifData.model}</div>
-                  )}
-                  {exifData.dateTime && (
-                    <div>{t('taken')}: {new Date(exifData.dateTime).toLocaleDateString()}</div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Upload Progress */}
-            {showProgress && uploadState.isUploading && (
-              <div className="mb-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium">{t('uploading')}</span>
-                  <span className="text-sm text-gray-500">
-                    {Math.round(uploadState.progress.percentage)}%
-                  </span>
-                </div>
-                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                  <div 
-                    className="bg-accent h-2 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${uploadState.progress.percentage}%` }}
-                  />
-                </div>
-                <div className="flex justify-between mt-2 text-xs text-gray-500">
-                  <span>{formatBytes(uploadState.progress.loaded)} / {formatBytes(uploadState.progress.total)}</span>
-                  <span>{formatBytes(uploadState.progress.speed)}/s</span>
-                  {uploadState.progress.estimatedTimeRemaining > 0 && (
-                    <span>{formatTime(uploadState.progress.estimatedTimeRemaining)}</span>
-                  )}
-                </div>
-                {uploadState.progress.chunks.total > 1 && (
-                  <div className="text-xs text-gray-500 mt-1">
-                    {t('chunk_progress', { 
-                      completed: uploadState.progress.chunks.completed,
-                      total: uploadState.progress.chunks.total
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Upload Controls */}
-            <div className="flex gap-2 justify-center">
-              {uploadState.isUploading && (
-                <button
-                  onClick={togglePauseUpload}
-                  className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 transition-colors text-sm"
-                  aria-label={uploadState.isPaused ? t('resume_upload') : t('pause_upload')}
-                >
-                  {uploadState.isPaused ? t('resume') : t('pause')}
-                </button>
-              )}
-              {(uploadState.isUploading || uploadState.isPaused) && (
-                <button
-                  onClick={cancelUpload}
-                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors text-sm"
-                  aria-label={t('cancel_upload')}
-                >
-                  {t('cancel')}
-                </button>
-              )}
-            </div>
-
-            {/* Error Display */}
-            {uploadState.error && (
-              <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-                <p className="text-red-600 dark:text-red-400 text-sm">{uploadState.error}</p>
-              </div>
+          
+          <div className="text-center">
+            <p className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-300 mb-1">
+              {loading ? getStatusMessage(uploadStatus) : isDragging ? t('drop_image_here') : t('drag_drop_image')}
+            </p>
+            {!loading && (
+              <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-500">
+                {t('or_click_to_select')}
+              </p>
             )}
           </div>
         )}
         
         {/* Mobile-specific hint */}
-        {!uploadState.file && (
+        {!loading && (
           <div className="absolute bottom-2 left-2 right-2 sm:hidden">
-            <p className="text-xs text-gray-400 text-center">
+            <p className="text-xs text-gray-400 text-center" aria-hidden="true">
               {t('tap_to_upload')}
+            </p>
+          </div>
+        )}
+        
+        {/* Drag overlay for screen readers */}
+        {isDragging && (
+          <div 
+            className="absolute inset-0 bg-accent/20 rounded-2xl flex items-center justify-center pointer-events-none"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <p className="text-accent font-medium text-lg">
+              {t('drop_image_here', 'Drop image here to upload')}
             </p>
           </div>
         )}
       </div>
       
-      {/* File type hint */}
-      {!uploadState.file && (
-        <div className="mt-3 text-center">
-          <p className="text-xs text-gray-400">
-            {t('supported_formats')}: {acceptedFormats.map(f => f.split('/')[1].toUpperCase()).join(', ')}
-          </p>
-          <p className="text-xs text-gray-400">
-            {t('max_size')}: {(maxSize / 1024 / 1024).toFixed(1)}MB
-          </p>
+      {/* Upload progress bar */}
+      {((uploadProgress !== undefined && uploadProgress > 0) || loading) && (
+        <div className="mt-3">
+          <div className="flex justify-between items-center mb-1">
+            <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+              {getStatusMessage(uploadStatus)}
+            </span>
+            {uploadProgress !== undefined && (
+              <span className="text-xs font-medium text-accent">
+                {Math.round(uploadProgress)}%
+              </span>
+            )}
+          </div>
+          <div 
+            id="upload-progress"
+            className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden"
+            role="progressbar"
+            aria-valuenow={uploadProgress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label={t('upload_progress', 'Upload progress: {{progress}}%', { progress: uploadProgress })}
+          >
+            <div 
+              className={`h-full bg-accent transition-all duration-300 ease-out ${uploadProgress === 100 && uploadStatus === 'processing' ? 'animate-pulse' : ''}`}
+              style={{ width: `${uploadProgress ?? 0}%` }}
+            />
+          </div>
+          <div className="sr-only" aria-live="polite" aria-atomic="true">
+            {t('upload_progress_announcement', 'Upload progress: {{progress}}% - {{status}}', { 
+              progress: uploadProgress, 
+              status: getStatusMessage(uploadStatus) 
+            })}
+          </div>
         </div>
       )}
+      
+      {/* File type hint */}
+      <div className="mt-3 text-center">
+        <p className="text-xs text-gray-400" role="note" aria-label={t('supported_formats_hint', 'Supported image formats: JPG, PNG, GIF, WebP, HEIC')}>
+          {t('supported_formats')}: JPG, PNG, GIF, WebP, HEIC
+        </p>
+      </div>
     </div>
   );
 }

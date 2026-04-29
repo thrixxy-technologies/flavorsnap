@@ -1,204 +1,141 @@
-interface ApiResponse<T = any> {
-  data?: T;
-  error?: string;
-  status: number;
-}
+import axios from 'axios';
 
-interface ApiOptions extends RequestInit {
-  retries?: number;
-  retryDelay?: number;
-}
+// Create axios instance with default configuration
+const api = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api',
+  timeout: 30000, // 30 seconds timeout
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
-class ApiError extends Error {
-  constructor(
-    message: string,
-    public status: number,
-    public data?: any,
-  ) {
-    super(message);
-    this.name = "ApiError";
+// Request interceptor to add auth token if available
+api.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('authToken');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
   }
-}
+);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const apiRequest = async <T = any>(
-  url: string,
-  options: ApiOptions = {},
-): Promise<ApiResponse<T>> => {
-  const { retries = 3, retryDelay = 1000, ...fetchOptions } = options;
-
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const isFormData = typeof FormData !== "undefined" && fetchOptions.body instanceof FormData;
-      const defaultHeaders: Record<string, string> = isFormData ? {} : { "Content-Type": "application/json" };
-
-      const headers: Record<string, string> = {
-        ...defaultHeaders,
-      };
-
-      // Add additional headers if provided
-      if (fetchOptions.headers) {
-        const additionalHeaders = fetchOptions.headers as Record<string, string>;
-        Object.keys(additionalHeaders).forEach(key => {
-          if (additionalHeaders[key] !== undefined) {
-            headers[key] = additionalHeaders[key];
-          }
-        });
-      }
-
-      const response = await fetch(url, {
-        headers,
-        ...fetchOptions,
-      });
-
-      const data = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        const errorMessage =
-          data?.error || data?.message || `HTTP ${response.status}`;
-        throw new ApiError(errorMessage, response.status, data);
-      }
-
-      return {
-        data,
-        status: response.status,
-      };
-    } catch (error) {
-      lastError =
-        error instanceof Error ? error : new Error("Unknown error occurred");
-
-      // Don't retry on client errors (4xx) except for 429 (rate limit)
-      if (
-        lastError instanceof ApiError &&
-        lastError.status >= 400 &&
-        lastError.status < 500 &&
-        lastError.status !== 429
-      ) {
-        break;
-      }
-
-      // If this is the last attempt, don't wait
-      if (attempt < retries) {
-        await sleep(retryDelay * Math.pow(2, attempt)); // Exponential backoff
-      }
+// Response interceptor for error handling
+api.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  (error) => {
+    if (error.response?.status === 401) {
+      // Token expired or invalid, clear local storage and redirect to login
+      localStorage.removeItem('authToken');
+      window.location.href = '/login';
     }
+    return Promise.reject(error);
   }
+);
 
-  return {
-    error: lastError?.message || "Request failed",
-    status: lastError instanceof ApiError ? lastError.status : 500,
-  };
+// API endpoints
+export const predictionAPI = {
+  // Classify food image
+  classifyImage: (formData: FormData) => {
+    return api.post('/predict', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
+
+  // Get food classes
+  getFoodClasses: () => {
+    return api.get('/predict/classes');
+  },
+
+  // Get classification history
+  getClassificationHistory: (userId: string, page?: number, limit?: number) => {
+    const params = new URLSearchParams();
+    if (page) params.append('page', page.toString());
+    if (limit) params.append('limit', limit.toString());
+    params.append('user_id', userId);
+    
+    return api.get(`/predict/history?${params}`);
+  },
+
+  // Submit feedback on classification
+  submitFeedback: (classificationId: string, isCorrect: boolean, correctLabel?: string) => {
+    return api.post('/predict/feedback', {
+      classification_id: classificationId,
+      is_correct: isCorrect,
+      correct_label: correctLabel,
+    });
+  },
+
+  // Get prediction statistics
+  getPredictionStats: (timeframe?: string) => {
+    const params = timeframe ? `?timeframe=${timeframe}` : '';
+    return api.get(`/predict/stats${params}`);
+  },
 };
 
-// Enhanced upload with progress tracking
-const uploadWithProgress = async (
-  url: string,
-  formData: FormData,
-  options: {
-    onProgress?: (progress: { loaded: number; total: number }) => void;
-    signal?: AbortSignal;
-    headers?: Record<string, string>;
-  } = {}
-): Promise<ApiResponse> => {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    
-    // Progress tracking
-    if (options.onProgress) {
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable) {
-          options.onProgress!({
-            loaded: event.loaded,
-            total: event.total
-          });
-        }
-      });
-    }
-    
-    // Load completion
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          resolve({
-            data,
-            status: xhr.status
-          });
-        } catch (error) {
-          resolve({
-            data: xhr.responseText,
-            status: xhr.status
-          });
-        }
-      } else {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          reject(new ApiError(
-            data?.error || data?.message || `HTTP ${xhr.status}`,
-            xhr.status,
-            data
-          ));
-        } catch {
-          reject(new ApiError(`HTTP ${xhr.status}`, xhr.status));
-        }
-      }
-    });
-    
-    // Error handling
-    xhr.addEventListener('error', () => {
-      reject(new ApiError('Network error', 0));
-    });
-    
-    xhr.addEventListener('abort', () => {
-      reject(new ApiError('Upload cancelled', 0));
-    });
-    
-    // Configure and send
-    xhr.open('POST', url);
-    
-    // Set headers
-    if (options.headers) {
-      Object.entries(options.headers).forEach(([key, value]) => {
-        xhr.setRequestHeader(key, value);
-      });
-    }
-    
-    // Handle abort signal
-    if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        xhr.abort();
-      });
-    }
-    
-    xhr.send(formData);
-  });
+export const userAPI = {
+  // Register new user
+  register: (userData: {
+    email: string;
+    username: string;
+    password: string;
+    first_name?: string;
+    last_name?: string;
+  }) => {
+    return api.post('/users/register', userData);
+  },
+
+  // Login user
+  login: (credentials: { email: string; password: string }) => {
+    return api.post('/users/login', credentials);
+  },
+
+  // Get user profile
+  getProfile: () => {
+    return api.get('/users/profile');
+  },
+
+  // Update user profile
+  updateProfile: (profileData: {
+    first_name?: string;
+    last_name?: string;
+    avatar_url?: string;
+  }) => {
+    return api.put('/users/profile', profileData);
+  },
 };
 
-// API methods with error handling
-export const api = {
-  get: <T = any>(url: string, options?: ApiOptions) =>
-    apiRequest<T>(url, { method: "GET", ...options }),
+export const foodAPI = {
+  // Get all food categories
+  getFoodCategories: () => {
+    return api.get('/foods');
+  },
 
-  post: <T = any>(url: string, data?: any, options?: ApiOptions) =>
-    apiRequest<T>(url, {
-      method: "POST",
-      body: (typeof FormData !== "undefined" && data instanceof FormData) ? data : (data ? JSON.stringify(data) : undefined),
-      ...options,
-    }),
+  // Get specific food category
+  getFoodCategory: (id: string) => {
+    return api.get(`/foods/${id}`);
+  },
 
-  put: <T = any>(url: string, data?: any, options?: ApiOptions) =>
-    apiRequest<T>(url, {
-      method: "PUT",
-      body: data ? JSON.stringify(data) : undefined,
-      ...options,
-    }),
-
-  delete: <T = any>(url: string, options?: ApiOptions) =>
-    apiRequest<T>(url, { method: "DELETE", ...options }),
+  // Get classifications for food category
+  getFoodClassifications: (id: string, page?: number, limit?: number) => {
+    const params = new URLSearchParams();
+    if (page) params.append('page', page.toString());
+    if (limit) params.append('limit', limit.toString());
+    
+    return api.get(`/foods/${id}/classifications?${params}`);
+  },
 };
 
-export { ApiError };
-export type { ApiResponse };
+// Health check
+export const healthCheck = () => {
+  return api.get('/health', { baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000' });
+};
+
+export default api;

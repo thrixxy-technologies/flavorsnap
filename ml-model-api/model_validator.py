@@ -21,8 +21,34 @@ import time
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+try:
+    import magic
+    MAGIC_AVAILABLE = True
+except ImportError:
+    MAGIC_AVAILABLE = False
+import io
+import hashlib
 
 from model_registry import ModelRegistry, ModelMetadata
+
+
+@dataclass
+class FileValidationResult:
+    """Results of file validation"""
+    filename: str
+    is_valid: bool
+    file_size: int
+    detected_mime_type: Optional[str] = None
+    image_dimensions: Optional[Tuple[int, int]] = None
+    file_hash: Optional[str] = None
+    validation_errors: List[str] = None
+    security_flags: List[str] = None
+    
+    def __post_init__(self):
+        if self.validation_errors is None:
+            self.validation_errors = []
+        if self.security_flags is None:
+            self.security_flags = []
 
 
 @dataclass
@@ -68,6 +94,22 @@ class ValidationResult:
 
 class ModelValidator:
     """Automated model validation and testing"""
+    
+    # File validation constants
+    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+    ALLOWED_MIME_TYPES = {
+        'image/jpeg', 'image/png', 'image/gif', 'image/webp'
+    }
+    MAX_FILE_SIZE = 16 * 1024 * 1024  # 16MB
+    MIN_IMAGE_DIMENSION = 32
+    MAX_IMAGE_DIMENSION = 8192
+    MALICIOUS_SIGNATURES = {
+        b'\x4D\x5A': 'PE executable',
+        b'\x7FELF': 'ELF executable',
+        b'\xCA\xFE\xBA\xBE': 'Java class',
+        b'\xD0\xCF\x11\xE0': 'Microsoft Office',
+        b'PK\x03\x04': 'ZIP archive'
+    }
     
     def __init__(self, 
                  model_registry: ModelRegistry,
@@ -594,3 +636,187 @@ class ModelValidator:
                 })
             
             return history
+    
+    def validate_uploaded_file(self, file, filename: str = None) -> FileValidationResult:
+        """Comprehensive file validation for uploaded files"""
+        if filename is None:
+            filename = getattr(file, 'filename', 'unknown_file')
+        
+        result = FileValidationResult(
+            filename=filename,
+            is_valid=False,
+            file_size=0
+        )
+        
+        try:
+            # Get file size
+            if hasattr(file, 'seek'):
+                file.seek(0, 2)  # Seek to end
+                result.file_size = file.tell()
+                file.seek(0)  # Reset to beginning
+            
+            # Read file content
+            if hasattr(file, 'read'):
+                file_content = file.read()
+                file.seek(0)  # Reset for further processing
+            else:
+                file_content = file
+            
+            # Calculate file hash
+            result.file_hash = hashlib.sha256(file_content).hexdigest()
+            
+            # Check file size
+            if result.file_size > self.MAX_FILE_SIZE:
+                result.validation_errors.append(
+                    f"File too large: {result.file_size} bytes (max: {self.MAX_FILE_SIZE} bytes)"
+                )
+                return result
+            
+            if result.file_size == 0:
+                result.validation_errors.append("File is empty")
+                return result
+            
+            # Check file extension
+            if '.' in filename:
+                ext = filename.rsplit('.', 1)[1].lower()
+                if ext not in self.ALLOWED_EXTENSIONS:
+                    result.validation_errors.append(
+                        f"Invalid file extension: {ext} (allowed: {', '.join(self.ALLOWED_EXTENSIONS)})"
+                    )
+                    return result
+            
+            # Detect MIME type
+            try:
+                if MAGIC_AVAILABLE:
+                    result.detected_mime_type = magic.from_buffer(file_content, mime=True)
+                else:
+                    # Fallback: use PIL to detect image format
+                    try:
+                        image = Image.open(io.BytesIO(file_content))
+                        format_to_mime = {
+                            'JPEG': 'image/jpeg',
+                            'PNG': 'image/png',
+                            'GIF': 'image/gif',
+                            'WEBP': 'image/webp'
+                        }
+                        result.detected_mime_type = format_to_mime.get(image.format, 'application/octet-stream')
+                    except:
+                        result.detected_mime_type = 'application/octet-stream'
+                
+                if result.detected_mime_type not in self.ALLOWED_MIME_TYPES:
+                    result.validation_errors.append(
+                        f"Unsupported MIME type: {result.detected_mime_type}"
+                    )
+                    return result
+            except Exception as e:
+                result.validation_errors.append(f"MIME type detection failed: {str(e)}")
+                return result
+            
+            # Check for malicious signatures
+            for signature, description in self.MALICIOUS_SIGNATURES.items():
+                if file_content.startswith(signature):
+                    result.security_flags.append(f"Malicious signature detected: {description}")
+                    result.validation_errors.append(f"Security threat: {description}")
+                    return result
+            
+            # Check for script content
+            try:
+                text_content = file_content.decode('utf-8', errors='ignore').lower()
+                script_patterns = [
+                    '<script', 'javascript:', 'vbscript:',
+                    'onload=', 'onerror=', 'onclick=',
+                    'eval(', 'document.', 'window.',
+                    'php://', 'data://', 'file://'
+                ]
+                
+                for pattern in script_patterns:
+                    if pattern in text_content:
+                        result.security_flags.append(f"Script content detected: {pattern}")
+                        result.validation_errors.append(f"Security threat: {pattern}")
+                        return result
+            except UnicodeDecodeError:
+                # Binary file, continue with image validation
+                pass
+            
+            # Validate image content
+            try:
+                image = Image.open(io.BytesIO(file_content))
+                
+                # Verify image format
+                if image.format not in ['JPEG', 'PNG', 'GIF', 'WEBP']:
+                    result.validation_errors.append(
+                        f"Unsupported image format: {image.format}"
+                    )
+                    return result
+                
+                # Get image dimensions
+                result.image_dimensions = image.size
+                width, height = image.size
+                
+                # Check dimensions
+                if width < self.MIN_IMAGE_DIMENSION or height < self.MIN_IMAGE_DIMENSION:
+                    result.validation_errors.append(
+                        f"Image too small: {width}x{height} (min: {self.MIN_IMAGE_DIMENSION}x{self.MIN_IMAGE_DIMENSION})"
+                    )
+                    return result
+                
+                if width > self.MAX_IMAGE_DIMENSION or height > self.MAX_IMAGE_DIMENSION:
+                    result.validation_errors.append(
+                        f"Image too large: {width}x{height} (max: {self.MAX_IMAGE_DIMENSION}x{self.MAX_IMAGE_DIMENSION})"
+                    )
+                    return result
+                
+                # Verify image can be loaded
+                image.verify()
+                
+                # Check aspect ratio
+                aspect_ratio = max(width, height) / min(width, height)
+                if aspect_ratio > 20:
+                    result.validation_errors.append(
+                        f"Extreme aspect ratio: {aspect_ratio:.2f}"
+                    )
+                    return result
+                
+                result.is_valid = True
+                
+            except Exception as e:
+                result.validation_errors.append(f"Image validation failed: {str(e)}")
+                return result
+            
+        except Exception as e:
+            result.validation_errors.append(f"Validation error: {str(e)}")
+        
+        return result
+    
+    def batch_validate_files(self, file_list: List[Tuple[Any, str]]) -> List[FileValidationResult]:
+        """Validate multiple files in batch"""
+        results = []
+        for file_data, filename in file_list:
+            result = self.validate_uploaded_file(file_data, filename)
+            results.append(result)
+        return results
+    
+    def get_validation_summary(self, results: List[FileValidationResult]) -> Dict[str, Any]:
+        """Get summary statistics for batch validation"""
+        total_files = len(results)
+        valid_files = sum(1 for r in results if r.is_valid)
+        invalid_files = total_files - valid_files
+        
+        security_issues = sum(len(r.security_flags) for r in results)
+        total_size = sum(r.file_size for r in results)
+        
+        mime_types = {}
+        for result in results:
+            if result.detected_mime_type:
+                mime_types[result.detected_mime_type] = mime_types.get(result.detected_mime_type, 0) + 1
+        
+        return {
+            'total_files': total_files,
+            'valid_files': valid_files,
+            'invalid_files': invalid_files,
+            'success_rate': valid_files / total_files if total_files > 0 else 0,
+            'security_issues': security_issues,
+            'total_size_bytes': total_size,
+            'mime_type_distribution': mime_types,
+            'validation_timestamp': datetime.now().isoformat()
+        }

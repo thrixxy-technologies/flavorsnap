@@ -1,20 +1,38 @@
+"""
+Advanced Queue Monitoring System for FlavorSnap
+Provides comprehensive monitoring, analytics, and alerting for queue operations
+"""
+
 import time
 import psutil
 import torch
-import json
-import logging
-import asyncio
-import aiohttp
+import numpy as np
+import pandas as pd
 from functools import wraps
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST, Info
+from collections import defaultdict, deque
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from flask import Flask, Response, request, make_response
+from dataclasses import dataclass, asdict
+import pytz
+
+# Optional imports
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    redis = None
 try:
     from persistence import log_prediction_history
 except Exception:
     log_prediction_history = None
+try:
+    from anomaly_detection import anomaly_system, AnomalyType
+except Exception:
+    anomaly_system = None
+    AnomalyType = None
 
 # Prometheus Metrics
 REQUEST_COUNT = Counter(
@@ -78,219 +96,244 @@ ACTIVE_CONNECTIONS = Gauge(
     'Number of active connections'
 )
 
-# Additional infrastructure monitoring metrics
-DISK_USAGE = Gauge(
-    'disk_usage_bytes',
-    'Disk usage in bytes',
-    ['mount_point']
-)
-
-NETWORK_IO = Gauge(
-    'network_io_bytes',
-    'Network I/O bytes',
-    ['direction']
-)
-
-PROCESS_COUNT = Gauge(
-    'process_count',
-    'Number of running processes'
-)
-
-SYSTEM_LOAD = Gauge(
-    'system_load_average',
-    'System load average',
-    ['period']
-)
-
-CONTAINER_STATUS = Info(
-    'container_status',
-    'Container status information'
-)
-
 DATABASE_CONNECTIONS = Gauge(
-    'database_connections',
+    'database_connection_pool_active',
     'Active database connections'
 )
 
-DATABASE_QUERY_DURATION = Histogram(
-    'database_query_duration_seconds',
-    'Database query duration in seconds',
-    ['query_type']
+REDIS_CONNECTION_STATUS = Gauge(
+    'redis_connection_status',
+    'Redis connection status (1=connected, 0=disconnected)'
 )
 
-CACHE_HIT_RATE = Gauge(
-    'cache_hit_rate',
-    'Cache hit rate percentage'
+MODEL_LOAD_TIME = Gauge(
+    'model_load_time_seconds',
+    'Time taken to load the model'
 )
+import threading
+import json
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Callable
+from dataclasses import dataclass, field
+from collections import defaultdict, deque
+from enum import Enum
+import logging
+import statistics
 
-ORACLE_REQUEST_COUNT = Counter(
-    'oracle_requests_total',
-    'Total oracle requests',
-    ['oracle_type', 'status']
-)
+logger = logging.getLogger(__name__)
 
-ZK_PROOF_COUNT = Counter(
-    'zk_proofs_total',
-    'Total ZK proofs generated/verified',
-    ['circuit_type', 'operation', 'status']
-)
+class AlertLevel(Enum):
+    """Alert severity levels"""
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
 
-DEPLOYMENT_STATUS = Info(
-    'deployment_status',
-    'Current deployment status'
-)
+class MetricType(Enum):
+    """Types of metrics to track"""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    TIMER = "timer"
 
-ALERT_COUNT = Counter(
-    'alerts_total',
-    'Total alerts triggered',
-    ['severity', 'type']
-)
+@dataclass
+class Metric:
+    """Metric data point"""
+    name: str
+    value: float
+    timestamp: datetime = field(default_factory=datetime.now)
+    labels: Dict[str, str] = field(default_factory=dict)
+    metric_type: MetricType = MetricType.GAUGE
 
-# Storage and CDN metrics
-STORAGE_OPERATIONS = Counter(
-    'storage_operations_total',
-    'Total storage operations',
-    ['operation', 'status']
-)
+@dataclass
+class Alert:
+    """Alert definition"""
+    name: str
+    level: AlertLevel
+    condition: str
+    threshold: float
+    message: str
+    enabled: bool = True
+    last_triggered: Optional[datetime] = None
+    trigger_count: int = 0
 
-STORAGE_BANDWIDTH = Counter(
-    'storage_bandwidth_bytes_total',
-    'Total storage bandwidth',
-    ['direction']
-)
+@dataclass
+class QueueMetrics:
+    """Queue-specific metrics"""
+    queue_name: str
+    total_tasks: int = 0
+    pending_tasks: int = 0
+    running_tasks: int = 0
+    completed_tasks: int = 0
+    failed_tasks: int = 0
+    average_wait_time: float = 0.0
+    average_processing_time: float = 0.0
+    throughput: float = 0.0  # tasks per second
+    error_rate: float = 0.0  # percentage
+    last_updated: datetime = field(default_factory=datetime.now)
 
-CDN_REQUESTS = Counter(
-    'cdn_requests_total',
-    'Total CDN requests',
-    ['status', 'cache_hit']
-)
-
-CDN_BANDWIDTH_SAVED = Counter(
-    'cdn_bandwidth_saved_bytes_total',
-    'Total CDN bandwidth saved'
-)
-
-STORAGE_COST = Gauge(
-    'storage_cost_usd',
-    'Current storage cost in USD'
-)
-
-CDN_COST_SAVINGS = Gauge(
-    'cdn_cost_savings_usd',
-    'CDN cost savings in USD'
-)
-
-class MonitoringMiddleware:
-    def __init__(self, app: Flask = None):
-        self.app = app
-        if app:
-            self.init_app(app)
+class MetricsCollector:
+    """Collects and stores metrics"""
     
-    def init_app(self, app: Flask):
-        app.before_request(self._before_request)
-        app.after_request(self._after_request)
-        app.teardown_request(self._teardown_request)
-        
-        # Add metrics endpoint
-        @app.route('/metrics')
-        def metrics():
-            # Update system metrics
-            self._update_system_metrics()
-            return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
-        
-        # Add health check with detailed metrics
-        @app.route('/health/detailed')
-        def detailed_health():
-            return self._get_detailed_health()
+    def __init__(self, max_history: int = 10000):
+        self.max_history = max_history
+        self._metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history))
+        self._counters: Dict[str, float] = defaultdict(float)
+        self._gauges: Dict[str, float] = defaultdict(float)
+        self._lock = threading.RLock()
     
-    def _before_request(self):
-        request.start_time = time.time()
+    def record_counter(self, name: str, value: float = 1.0, labels: Dict[str, str] = None):
+        """Record counter metric"""
+        with self._lock:
+            key = self._make_key(name, labels)
+            self._counters[key] += value
+            metric = Metric(name, self._counters[key], metric_type=MetricType.COUNTER, labels=labels or {})
+            self._metrics[key].append(metric)
     
-    def _after_request(self, response):
-        if hasattr(request, 'start_time'):
-            duration = time.time() - request.start_time
+    def set_gauge(self, name: str, value: float, labels: Dict[str, str] = None):
+        """Set gauge metric"""
+        with self._lock:
+            key = self._make_key(name, labels)
+            self._gauges[key] = value
+            metric = Metric(name, value, metric_type=MetricType.GAUGE, labels=labels or {})
+            self._metrics[key].append(metric)
+    
+    def record_histogram(self, name: str, value: float, labels: Dict[str, str] = None):
+        """Record histogram metric"""
+        with self._lock:
+            key = self._make_key(name, labels)
+            metric = Metric(name, value, metric_type=MetricType.HISTOGRAM, labels=labels or {})
+            self._metrics[key].append(metric)
+    
+    def record_timer(self, name: str, duration_ms: float, labels: Dict[str, str] = None):
+        """Record timer metric"""
+        with self._lock:
+            key = self._make_key(name, labels)
+            metric = Metric(name, duration_ms, metric_type=MetricType.TIMER, labels=labels or {})
+            self._metrics[key].append(metric)
+    
+    def _make_key(self, name: str, labels: Dict[str, str] = None) -> str:
+        """Create metric key from name and labels"""
+        if not labels:
+            return name
+        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        return f"{name}[{label_str}]"
+    
+    def get_metric_history(self, name: str, labels: Dict[str, str] = None, 
+                          since: Optional[datetime] = None) -> List[Metric]:
+        """Get metric history"""
+        with self._lock:
+            key = self._make_key(name, labels)
+            metrics = list(self._metrics[key])
             
-            # Record request metrics
-            REQUEST_COUNT.labels(
-                method=request.method,
-                endpoint=request.endpoint or 'unknown',
-                status=response.status_code
-            ).inc()
+            if since:
+                metrics = [m for m in metrics if m.timestamp >= since]
             
-            REQUEST_DURATION.labels(
-                method=request.method,
-                endpoint=request.endpoint or 'unknown'
-            ).observe(duration)
-        
-        return response
+            return metrics
     
-    def _teardown_request(self, exception):
-        if exception:
-            REQUEST_EXCEPTIONS.labels(
-                method=request.method,
-                endpoint=request.endpoint or 'unknown'
-            ).inc()
+    def get_current_metrics(self) -> Dict[str, Any]:
+        """Get current metric values"""
+        with self._lock:
+            result = {}
+            
+            # Add counters
+            for key, value in self._counters.items():
+                result[key] = {"type": "counter", "value": value}
+            
+            # Add gauges
+            for key, value in self._gauges.items():
+                result[key] = {"type": "gauge", "value": value}
+            
+            return result
     
-    def _update_system_metrics(self):
-        # Update memory usage
-        memory = psutil.virtual_memory()
-        MEMORY_USAGE.set(memory.used)
+    def calculate_percentiles(self, name: str, percentiles: List[float] = None,
+                            labels: Dict[str, str] = None) -> Dict[str, float]:
+        """Calculate percentiles for histogram/timer metrics"""
+        if percentiles is None:
+            percentiles = [50.0, 90.0, 95.0, 99.0]
         
-        # Update CPU usage
-        CPU_USAGE.set(psutil.cpu_percent())
+        metrics = self.get_metric_history(name, labels)
+        if not metrics:
+            return {}
         
-        # Update GPU memory if available
-        if torch.cuda.is_available():
-            GPU_MEMORY_USAGE.set(torch.cuda.memory_allocated())
+        values = [m.value for m in metrics]
+        result = {}
         
-        # Update active connections (placeholder)
-        ACTIVE_CONNECTIONS.set(1)  # This would need actual connection tracking
-    
-    def _get_detailed_health(self) -> Dict[str, Any]:
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
+        for p in percentiles:
+            try:
+                result[f"p{p}"] = statistics.percentile(values, p)
+            except Exception as e:
+                logger.error(f"Error calculating percentile {p}: {e}")
+                result[f"p{p}"] = 0.0
         
-        health_data = {
-            'status': 'healthy',
-            'timestamp': time.time(),
-            'system': {
-                'cpu_percent': psutil.cpu_percent(),
-                'memory': {
-                    'total': memory.total,
-                    'available': memory.available,
-                    'percent': memory.percent,
-                    'used': memory.used
-                },
-                'disk': {
-                    'total': disk.total,
-                    'used': disk.used,
-                    'free': disk.free,
-                    'percent': (disk.used / disk.total) * 100
-                }
-            },
-            'gpu': {
-                'available': torch.cuda.is_available(),
-                'device_count': torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                'memory_allocated': torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
-                'memory_cached': torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
-            },
-            'model': {
-                'loaded': True,  # This would be set based on actual model state
-                'accuracy': MODEL_ACCURACY._value.get() if MODEL_ACCURACY._value else 0.0
-            }
-        }
-        
-        return health_data
+        return result
 
-def track_inference(func):
-    """Decorator to track model inference metrics"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        status = 'success'
-        resp_obj = None
-        try:
-            result = func(*args, **kwargs)
+class AlertManager:
+    """Manages alerts and notifications"""
+    
+    def __init__(self):
+        self._alerts: Dict[str, Alert] = {}
+        self._alert_handlers: List[Callable] = []
+        self._lock = threading.RLock()
+    
+    def add_alert(self, alert: Alert):
+        """Add alert definition"""
+        with self._lock:
+            self._alerts[alert.name] = alert
+    
+    def remove_alert(self, name: str):
+        """Remove alert"""
+        with self._lock:
+            self._alerts.pop(name, None)
+    
+    def add_alert_handler(self, handler: Callable[[Alert], None]):
+        """Add alert notification handler"""
+        self._alert_handlers.append(handler)
+    
+    def check_alerts(self, metrics_collector: MetricsCollector):
+        """Check all alerts against current metrics"""
+        current_metrics = metrics_collector.get_current_metrics()
+        
+        with self._lock:
+            for alert in self._alerts.values():
+                if not alert.enabled:
+                    continue
+                
+                try:
+                    if self._evaluate_condition(alert.condition, alert.threshold, current_metrics):
+                        self._trigger_alert(alert)
+                except Exception as e:
+                    logger.error(f"Error evaluating alert {alert.name}: {e}")
+    
+    def _evaluate_condition(self, condition: str, threshold: float, metrics: Dict[str, Any]) -> bool:
+        """Evaluate alert condition"""
+        # Simple condition evaluation - can be extended with more complex logic
+        metric_name = condition.split()[0]  # Extract metric name
+        
+        if metric_name in metrics:
+            current_value = metrics[metric_name]["value"]
+            
+            if ">" in condition:
+                return current_value > threshold
+            elif "<" in condition:
+                return current_value < threshold
+            elif ">=" in condition:
+                return current_value >= threshold
+            elif "<=" in condition:
+                return current_value <= threshold
+            elif "==" in condition:
+                return current_value == threshold
+        
+        return False
+    
+    def _trigger_alert(self, alert: Alert):
+        """Trigger alert notification"""
+        alert.last_triggered = datetime.now()
+        alert.trigger_count += 1
+        
+        logger.warning(f"Alert triggered: {alert.name} - {alert.message}")
+        
+        for handler in self._alert_handlers:
             try:
                 resp_obj = make_response(result)
             except Exception:
@@ -333,519 +376,1170 @@ def update_model_accuracy(accuracy: float):
     """Update model accuracy metric"""
     MODEL_ACCURACY.set(accuracy)
 
-@dataclass
-class Alert:
-    """Alert data structure"""
-    timestamp: datetime
-    severity: str  # critical, warning, info
-    type: str
-    message: str
-    source: str
-    resolved: bool = False
-    resolved_at: Optional[datetime] = None
+# Data Quality Monitoring
+DATA_QUALITY_SCORE = Gauge(
+    'data_quality_score',
+    'Overall data quality score (0-100)'
+)
 
-@dataclass
-class HealthCheck:
-    """Health check data structure"""
-    service_name: str
-    status: str  # healthy, unhealthy, degraded
-    timestamp: datetime
-    response_time: float
-    error_message: Optional[str] = None
-    metrics: Dict[str, Any] = None
+MISSING_DATA_RATE = Gauge(
+    'missing_data_rate',
+    'Rate of missing data in incoming requests'
+)
 
-class InfrastructureMonitor:
-    """Comprehensive infrastructure monitoring system"""
+DUPLICATE_DATA_RATE = Gauge(
+    'duplicate_data_rate',
+    'Rate of duplicate data detected'
+)
+
+DATA_DRIFT_SCORE = Gauge(
+    'data_drift_score',
+    'Data drift detection score'
+)
+
+
+MISSING_DATA_RATE = Gauge(
+    'missing_data_rate',
+    'Rate of missing data in incoming requests'
+)
+
+DUPLICATE_DATA_RATE = Gauge(
+    'duplicate_data_rate',
+    'Rate of duplicate data detected'
+)
+
+
+MISSING_DATA_RATE = Gauge(
+    'missing_data_rate',
+    'Rate of missing data in incoming requests'
+)
+
+DUPLICATE_DATA_RATE = Gauge(
+    'duplicate_data_rate',
+    'Rate of duplicate data detected'
+)
+
+DATA_DRIFT_SCORE = Gauge(
+    'data_drift_score',
+    'Data drift detection score'
+)
+
+
+
+MISSING_DATA_RATE = Gauge(
+    'missing_data_rate',
+    'Rate of missing data in incoming requests'
+)
+
+DUPLICATE_DATA_RATE = Gauge(
+    'duplicate_data_rate',
+    'Rate of duplicate data detected'
+)
+
+DATA_DRIFT_SCORE = Gauge(
+    'data_drift_score',
+    'Data drift detection score'
+)
+
+VALIDATION_ERRORS = Counter(
+    'validation_errors_total',
+    'Total validation errors',
+    ['error_type']
+)
+
+class DataQualityMonitor:
+    """Data quality monitoring and validation"""
     
-    def __init__(self, app: Flask = None):
-        self.app = app
-        self.logger = logging.getLogger('InfrastructureMonitor')
-        self.alerts: List[Alert] = []
-        self.health_checks: Dict[str, HealthCheck] = {}
-        self.metrics_history: List[Dict[str, Any]] = []
-        self.alert_thresholds = {
-            'cpu_usage': 80.0,
-            'memory_usage': 85.0,
-            'disk_usage': 90.0,
-            'response_time': 5.0,
-            'error_rate': 5.0
+    def __init__(self):
+        self.data_buffer = deque(maxlen=1000)
+        self.baseline_stats = {}
+        self.validation_rules = {
+            'image_size_range': (10, 16 * 1024 * 1024),  # 10 bytes to 16MB
+            'allowed_formats': ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+            'max_text_length': 1000,
+            'required_fields': ['image', 'timestamp']
+        }
+        self.duplicate_detector = set()
+        self.drift_detector = None
+    
+    
+    def __init__(self):
+        self.data_buffer = deque(maxlen=1000)
+        self.baseline_stats = {}
+        self.validation_rules = {
+            'image_size_range': (10, 16 * 1024 * 1024),  # 10 bytes to 16MB
+            'allowed_formats': ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+            'max_text_length': 1000,
+            'required_fields': ['image', 'timestamp']
+        }
+        self.duplicate_detector = set()
+        self.drift_detector = None
+    
+    def validate_request_data(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate incoming request data"""
+        validation_result = {
+            'is_valid': True,
+            'errors': [],
+            'warnings': [],
+            'quality_score': 100
         }
         
-        if app:
-            self.init_app(app)
-    
-    def init_app(self, app: Flask):
-        """Initialize monitoring with Flask app"""
-        self.app = app
-        
-        # Add additional monitoring endpoints
-        @app.route('/monitoring/health')
-        def monitoring_health():
-            return self.get_overall_health()
-        
-        @app.route('/monitoring/alerts')
-        def get_alerts():
-            return self.get_active_alerts()
-        
-        @app.route('/monitoring/metrics/history')
-        def metrics_history():
-            return self.get_metrics_history()
-        
-        @app.route('/monitoring/status')
-        def infrastructure_status():
-            return self.get_infrastructure_status()
-    
-    def collect_system_metrics(self) -> Dict[str, Any]:
-        """Collect comprehensive system metrics"""
         try:
-            # CPU metrics
-            cpu_percent = psutil.cpu_percent(interval=1)
-            cpu_count = psutil.cpu_count()
-            load_avg = psutil.getloadavg() if hasattr(psutil, 'getloadavg') else [0, 0, 0]
+            # Check required fields
+            for field in self.validation_rules['required_fields']:
+                if field not in request_data:
+                    validation_result['errors'].append(f"Missing required field: {field}")
+                    validation_result['is_valid'] = False
+                    VALIDATION_ERRORS.labels(error_type='missing_field').inc()
             
-            # Memory metrics
-            memory = psutil.virtual_memory()
-            swap = psutil.swap_memory()
+            # Validate image data if present
+            if 'image' in request_data:
+                image_errors = self._validate_image_data(request_data['image'])
+                validation_result['errors'].extend(image_errors)
+                if image_errors:
+                    validation_result['is_valid'] = False
+                    VALIDATION_ERRORS.labels(error_type='image_validation').inc()
             
-            # Disk metrics
-            disk_partitions = psutil.disk_partitions()
-            disk_usage = {}
-            for partition in disk_partitions:
-                try:
-                    usage = psutil.disk_usage(partition.mountpoint)
-                    disk_usage[partition.mountpoint] = {
-                        'total': usage.total,
-                        'used': usage.used,
-                        'free': usage.free,
-                        'percent': usage.percent
-                    }
-                except PermissionError:
-                    continue
+            # Check for duplicates
+            if self._is_duplicate(request_data):
+                validation_result['warnings'].append("Potential duplicate data detected")
+                validation_result['quality_score'] -= 10
             
-            # Network metrics
-            network_io = psutil.net_io_counters()
-            network_interfaces = psutil.net_if_addrs()
+            # Calculate quality score
+            validation_result['quality_score'] = max(0, validation_result['quality_score'] - len(validation_result['errors']) * 20 - len(validation_result['warnings']) * 5)
             
-            # Process metrics
-            process_count = len(psutil.pids())
+            # Update metrics
+            self._update_quality_metrics(validation_result)
             
-            # GPU metrics
-            gpu_metrics = {}
-            if torch.cuda.is_available():
-                for i in range(torch.cuda.device_count()):
-                    gpu_metrics[f'gpu_{i}'] = {
-                        'memory_allocated': torch.cuda.memory_allocated(i),
-                        'memory_cached': torch.cuda.memory_reserved(i),
-                        'memory_total': torch.cuda.get_device_properties(i).total_memory
-                    }
+            # Store for drift detection
+            self.data_buffer.append({
+                'timestamp': datetime.now(),
+                'data': request_data,
+                'quality_score': validation_result['quality_score']
+            })
             
-            metrics = {
-                'timestamp': datetime.now().isoformat(),
-                'cpu': {
-                    'percent': cpu_percent,
-                    'count': cpu_count,
-                    'load_average': {
-                        '1min': load_avg[0],
-                        '5min': load_avg[1],
-                        '15min': load_avg[2]
-                    }
-                },
-                'memory': {
-                    'total': memory.total,
-                    'available': memory.available,
-                    'percent': memory.percent,
-                    'used': memory.used,
-                    'cached': getattr(memory, 'cached', 0)
-                },
-                'swap': {
-                    'total': swap.total,
-                    'used': swap.used,
-                    'free': swap.free,
-                    'percent': swap.percent
-                },
-                'disk': disk_usage,
-                'network': {
-                    'bytes_sent': network_io.bytes_sent,
-                    'bytes_recv': network_io.bytes_recv,
-                    'packets_sent': network_io.packets_sent,
-                    'packets_recv': network_io.packets_recv,
-                    'interfaces': list(network_interfaces.keys())
-                },
-                'processes': {
-                    'count': process_count,
-                    'running': len([p for p in psutil.process_iter() if p.status() == 'running'])
-                },
-                'gpu': gpu_metrics
-            }
-            
-            # Update Prometheus metrics
-            self._update_prometheus_metrics(metrics)
-            
-            # Store in history
-            self.metrics_history.append(metrics)
-            if len(self.metrics_history) > 1000:  # Keep only last 1000 entries
-                self.metrics_history.pop(0)
-            
-            # Check for alerts
-            self._check_alerts(metrics)
-            
-            return metrics
-            
-        except Exception as e:
-            self.logger.error(f"Error collecting system metrics: {e}")
-            return {}
-    
-    def _update_prometheus_metrics(self, metrics: Dict[str, Any]):
-        """Update Prometheus metrics with collected data"""
-        try:
-            # Update existing metrics
-            CPU_USAGE.set(metrics['cpu']['percent'])
-            MEMORY_USAGE.set(metrics['memory']['used'])
-            
-            # Update new metrics
-            PROCESS_COUNT.set(metrics['processes']['count'])
-            
-            # System load
-            for period, value in [('1min', metrics['cpu']['load_average']['1min']),
-                                 ('5min', metrics['cpu']['load_average']['5min']),
-                                 ('15min', metrics['cpu']['load_average']['15min'])]:
-                SYSTEM_LOAD.labels(period=period).set(value)
-            
-            # Disk usage
-            for mount_point, usage in metrics['disk'].items():
-                DISK_USAGE.labels(mount_point=mount_point).set(usage['used'])
-            
-            # Network I/O
-            NETWORK_IO.labels(direction='sent').set(metrics['network']['bytes_sent'])
-            NETWORK_IO.labels(direction='recv').set(metrics['network']['bytes_recv'])
-            
-            # GPU metrics
-            for gpu_name, gpu_data in metrics['gpu'].items():
-                GPU_MEMORY_USAGE.set(gpu_data['memory_allocated'])
-            
-        except Exception as e:
-            self.logger.error(f"Error updating Prometheus metrics: {e}")
-    
-    def _check_alerts(self, metrics: Dict[str, Any]):
-        """Check metrics against thresholds and generate alerts"""
-        try:
-            # CPU usage alert
-            if metrics['cpu']['percent'] > self.alert_thresholds['cpu_usage']:
-                self.create_alert(
-                    severity='warning',
-                    alert_type='cpu_usage',
-                    message=f"CPU usage is {metrics['cpu']['percent']:.1f}%",
-                    source='system_monitor'
-                )
-            
-            # Memory usage alert
-            if metrics['memory']['percent'] > self.alert_thresholds['memory_usage']:
-                self.create_alert(
-                    severity='warning',
-                    alert_type='memory_usage',
-                    message=f"Memory usage is {metrics['memory']['percent']:.1f}%",
-                    source='system_monitor'
-                )
-            
-            # Disk usage alert
-            for mount_point, usage in metrics['disk'].items():
-                if usage['percent'] > self.alert_thresholds['disk_usage']:
-                    self.create_alert(
-                        severity='critical',
-                        alert_type='disk_usage',
-                        message=f"Disk usage for {mount_point} is {usage['percent']:.1f}%",
-                        source='system_monitor'
-                    )
-            
-            # System load alert
-            if metrics['cpu']['load_average']['1min'] > metrics['cpu']['count']:
-                self.create_alert(
-                    severity='warning',
-                    alert_type='system_load',
-                    message=f"System load ({metrics['cpu']['load_average']['1min']:.2f}) exceeds CPU count ({metrics['cpu']['count']})",
-                    source='system_monitor'
-                )
-            
-        except Exception as e:
-            self.logger.error(f"Error checking alerts: {e}")
-    
-    def create_alert(self, severity: str, alert_type: str, message: str, source: str):
-        """Create a new alert"""
-        alert = Alert(
-            timestamp=datetime.now(),
-            severity=severity,
-            type=alert_type,
-            message=message,
-            source=source
-        )
-        
-        self.alerts.append(alert)
-        
-        # Update alert counter
-        ALERT_COUNT.labels(severity=severity, type=alert_type).inc()
-        
-        # Log alert
-        self.logger.warning(f"ALERT [{severity.upper()}] {alert_type}: {message}")
-        
-        # Keep only last 1000 alerts
-        if len(self.alerts) > 1000:
-            self.alerts.pop(0)
-    
-    def perform_health_check(self, service_name: str, check_url: str = None) -> HealthCheck:
-        """Perform health check for a service"""
-        start_time = time.time()
-        status = 'healthy'
-        error_message = None
-        metrics = {}
-        
-        try:
-            if check_url:
-                # Perform HTTP health check
-                import requests
-                response = requests.get(check_url, timeout=10)
-                response_time = time.time() - start_time
-                
-                if response.status_code != 200:
-                    status = 'unhealthy'
-                    error_message = f"HTTP {response.status_code}"
-                
-                if response_time > self.alert_thresholds['response_time']:
-                    status = 'degraded'
-                    error_message = f"Response time: {response_time:.2f}s"
-                
-                metrics = {
-                    'response_time': response_time,
-                    'status_code': response.status_code
+            # Trigger anomaly detection if available
+            if anomaly_system:
+                quality_data = {
+                    'missing_rate': len([e for e in validation_result['errors'] if 'missing' in e.lower()]) / max(len(self.validation_rules['required_fields']), 1),
+                    'duplicate_rate': 1.0 if self._is_duplicate(request_data) else 0.0,
+                    'quality_score': validation_result['quality_score'] / 100.0,
+                    'validation_errors': len(validation_result['errors'])
                 }
-            else:
-                # Internal service health check
-                metrics = self.collect_system_metrics()
-                response_time = time.time() - start_time
-                
-                # Check system health
-                if (metrics['cpu']['percent'] > 90 or 
-                    metrics['memory']['percent'] > 95):
-                    status = 'degraded'
-                    error_message = "High resource usage"
-                
+                anomalies = anomaly_system.detect_anomalies(quality_data)
+                if anomalies:
+                    validation_result['anomalies'] = [a.to_dict() for a in anomalies]
+            
         except Exception as e:
-            status = 'unhealthy'
-            error_message = str(e)
-            response_time = time.time() - start_time
+            validation_result['errors'].append(f"Validation error: {str(e)}")
+            validation_result['is_valid'] = False
+            VALIDATION_ERRORS.labels(error_type='system_error').inc()
         
-        health_check = HealthCheck(
-            service_name=service_name,
-            status=status,
-            timestamp=datetime.now(),
-            response_time=response_time,
-            error_message=error_message,
-            metrics=metrics
-        )
-        
-        self.health_checks[service_name] = health_check
-        
-        # Create alert if unhealthy
-        if status == 'unhealthy':
-            self.create_alert(
-                severity='critical',
-                alert_type='service_health',
-                message=f"Service {service_name} is unhealthy: {error_message}",
-                source='health_check'
-            )
-        elif status == 'degraded':
-            self.create_alert(
-                severity='warning',
-                alert_type='service_health',
-                message=f"Service {service_name} is degraded: {error_message}",
-                source='health_check'
-            )
-        
-        return health_check
+        return validation_result
     
-    def get_overall_health(self) -> Dict[str, Any]:
-        """Get overall system health status"""
+    def _validate_image_data(self, image_data: Any) -> List[str]:
+        """Validate image data"""
+        errors = []
+        
         try:
-            # Collect current metrics
-            metrics = self.collect_system_metrics()
+            # Check image size
+            if hasattr(image_data, 'seek') and hasattr(image_data, 'tell'):
+                image_data.seek(0, 2)  # Seek to end
+                size = image_data.tell()
+                image_data.seek(0)  # Reset position
+                
+                min_size, max_size = self.validation_rules['image_size_range']
+                if size < min_size or size > max_size:
+                    errors.append(f"Image size {size} bytes is outside valid range [{min_size}, {max_size}]")
             
-            # Perform health checks
-            services = ['api', 'database', 'cache', 'oracle', 'zk_proofs']
-            for service in services:
-                self.perform_health_check(service)
+            # Check file format if filename is available
+            if hasattr(image_data, 'filename') and image_data.filename:
+                ext = image_data.filename.rsplit('.', 1)[1].lower() if '.' in image_data.filename else ''
+                if ext not in self.validation_rules['allowed_formats']:
+                    errors.append(f"Unsupported image format: {ext}")
+        
+        except Exception as e:
+            errors.append(f"Image validation error: {str(e)}")
+        
+        return errors
+    
+    def _is_duplicate(self, request_data: Dict[str, Any]) -> bool:
+        """Check for duplicate data"""
+        try:
+            # Create a hash of key fields for duplicate detection
+            key_fields = []
+            if 'image' in request_data and hasattr(request_data['image'], 'filename'):
+                key_fields.append(request_data['image'].filename)
+            if 'timestamp' in request_data:
+                key_fields.append(str(request_data['timestamp']))
             
-            # Calculate overall status
-            total_checks = len(self.health_checks)
-            healthy_checks = sum(1 for check in self.health_checks.values() if check.status == 'healthy')
-            degraded_checks = sum(1 for check in self.health_checks.values() if check.status == 'degraded')
+            if key_fields:
+                data_hash = hash(tuple(key_fields))
+                if data_hash in self.duplicate_detector:
+                    return True
+                self.duplicate_detector.add(data_hash)
+                
+                # Clean old hashes to prevent memory issues
+                if len(self.duplicate_detector) > 10000:
+                    # Keep only recent half
+                    self.duplicate_detector = set(list(self.duplicate_detector)[-5000:])
+        
+        except Exception:
+            pass
+        
+        
+        try:
+            # Check image size
+            if hasattr(image_data, 'seek') and hasattr(image_data, 'tell'):
+                image_data.seek(0, 2)  # Seek to end
+                size = image_data.tell()
+                image_data.seek(0)  # Reset position
+                
+                min_size, max_size = self.validation_rules['image_size_range']
+                if size < min_size or size > max_size:
+                    errors.append(f"Image size {size} bytes is outside valid range [{min_size}, {max_size}]")
             
-            if healthy_checks == total_checks:
-                overall_status = 'healthy'
-            elif degraded_checks > 0:
-                overall_status = 'degraded'
-            else:
-                overall_status = 'unhealthy'
+            # Check file format if filename is available
+            if hasattr(image_data, 'filename') and image_data.filename:
+                ext = image_data.filename.rsplit('.', 1)[1].lower() if '.' in image_data.filename else ''
+                if ext not in self.validation_rules['allowed_formats']:
+                    errors.append(f"Unsupported image format: {ext}")
+        
+        except Exception as e:
+            errors.append(f"Image validation error: {str(e)}")
+        
+        return errors
+    
+    def _is_duplicate(self, request_data: Dict[str, Any]) -> bool:
+        """Check for duplicate data"""
+        try:
+            # Create a hash of key fields for duplicate detection
+            key_fields = []
+            if 'image' in request_data and hasattr(request_data['image'], 'filename'):
+                key_fields.append(request_data['image'].filename)
+            if 'timestamp' in request_data:
+                key_fields.append(str(request_data['timestamp']))
+            
+            if key_fields:
+                data_hash = hash(tuple(key_fields))
+                if data_hash in self.duplicate_detector:
+                    return True
+                self.duplicate_detector.add(data_hash)
+                
+                # Clean old hashes to prevent memory issues
+                if len(self.duplicate_detector) > 10000:
+                    # Keep only recent half
+                    self.duplicate_detector = set(list(self.duplicate_detector)[-5000:])
+        
+        except Exception:
+            pass
+        
+        return False
+    
+    def _update_quality_metrics(self, validation_result: Dict[str, Any]):
+        """Update data quality metrics"""
+        try:
+        
+        try:
+            # Check image size
+            if hasattr(image_data, 'seek') and hasattr(image_data, 'tell'):
+                image_data.seek(0, 2)  # Seek to end
+                size = image_data.tell()
+                image_data.seek(0)  # Reset position
+                
+                min_size, max_size = self.validation_rules['image_size_range']
+                if size < min_size or size > max_size:
+                    errors.append(f"Image size {size} bytes is outside valid range [{min_size}, {max_size}]")
+            
+            # Check file format if filename is available
+            if hasattr(image_data, 'filename') and image_data.filename:
+                ext = image_data.filename.rsplit('.', 1)[1].lower() if '.' in image_data.filename else ''
+                if ext not in self.validation_rules['allowed_formats']:
+                    errors.append(f"Unsupported image format: {ext}")
+        
+        except Exception as e:
+            errors.append(f"Image validation error: {str(e)}")
+        
+        return errors
+    
+    def _is_duplicate(self, request_data: Dict[str, Any]) -> bool:
+        """Check for duplicate data"""
+        try:
+            # Create a hash of key fields for duplicate detection
+            key_fields = []
+            if 'image' in request_data and hasattr(request_data['image'], 'filename'):
+                key_fields.append(request_data['image'].filename)
+            if 'timestamp' in request_data:
+                key_fields.append(str(request_data['timestamp']))
+            
+            if key_fields:
+                data_hash = hash(tuple(key_fields))
+                if data_hash in self.duplicate_detector:
+                    return True
+                self.duplicate_detector.add(data_hash)
+                
+                # Clean old hashes to prevent memory issues
+                if len(self.duplicate_detector) > 10000:
+                    # Keep only recent half
+                    self.duplicate_detector = set(list(self.duplicate_detector)[-5000:])
+        
+        except Exception:
+            pass
+        
+        return False
+    
+    def _update_quality_metrics(self, validation_result: Dict[str, Any]):
+        """Update data quality metrics"""
+        try:
+            # Update quality score
+            DATA_QUALITY_SCORE.set(validation_result['quality_score'])
+            
+            # Calculate missing data rate
+            missing_rate = len([e for e in validation_result['errors'] if 'missing' in e.lower()]) / max(len(self.validation_rules['required_fields']), 1)
+            MISSING_DATA_RATE.set(missing_rate)
+            
+            # Calculate duplicate rate
+            duplicate_rate = 1.0 if any('duplicate' in w.lower() for w in validation_result['warnings']) else 0.0
+            DUPLICATE_DATA_RATE.set(duplicate_rate)
+            
+        except Exception:
+            pass
+    
+            
+        except Exception:
+            pass
+    
+            
+        except Exception:
+            pass
+    
+    def detect_data_drift(self) -> Dict[str, Any]:
+        """Detect data drift using statistical methods"""
+        try:
+            if len(self.data_buffer) < 100:
+                return {'drift_detected': False, 'reason': 'Insufficient data'}
+            
+            # Get recent and historical data
+            recent_data = list(self.data_buffer)[-50:]  # Last 50 records
+            historical_data = list(self.data_buffer)[:-50]  # Everything before recent
+            
+            if len(historical_data) < 50:
+                return {'drift_detected': False, 'reason': 'Insufficient historical data'}
+            
+            # Compare quality scores
+            recent_scores = [d['quality_score'] for d in recent_data]
+            historical_scores = [d['quality_score'] for d in historical_data]
+            
+            # Statistical test for drift
+            recent_mean = np.mean(recent_scores)
+            historical_mean = np.mean(historical_scores)
+            
+            # Calculate drift score
+            drift_score = abs(recent_mean - historical_mean) / max(historical_mean, 1)
+            
+            # Update drift metric
+            DATA_DRIFT_SCORE.set(drift_score)
+            
+            drift_detected = drift_score > 0.15  # 15% change threshold
             
             return {
-                'status': overall_status,
-                'timestamp': datetime.now().isoformat(),
-                'services': {name: asdict(check) for name, check in self.health_checks.items()},
-                'metrics': metrics,
+                'drift_detected': drift_detected,
+                'drift_score': drift_score,
+                'recent_mean': recent_mean,
+                'historical_mean': historical_mean,
+                'sample_sizes': {'recent': len(recent_data), 'historical': len(historical_data)}
+            }
+        
+        except Exception as e:
+            return {'drift_detected': False, 'error': str(e)}
+    
+    def get_quality_report(self) -> Dict[str, Any]:
+        """Generate comprehensive data quality report"""
+        try:
+            if not self.data_buffer:
+                return {'status': 'no_data', 'message': 'No data available for analysis'}
+            
+            recent_data = list(self.data_buffer)[-100:]  # Last 100 records
+            
+            # Calculate statistics
+            quality_scores = [d['quality_score'] for d in recent_data]
+            timestamps = [d['timestamp'] for d in recent_data]
+            
+            report = {
                 'summary': {
-                    'total_services': total_checks,
-                    'healthy': healthy_checks,
-                    'degraded': degraded_checks,
-                    'unhealthy': total_checks - healthy_checks - degraded_checks
-                }
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Error getting overall health: {e}")
-            return {
-                'status': 'error',
-                'timestamp': datetime.now().isoformat(),
-                'error': str(e)
-            }
-    
-    def get_active_alerts(self) -> Dict[str, Any]:
-        """Get active alerts"""
-        active_alerts = [alert for alert in self.alerts if not alert.resolved]
-        
-        # Group alerts by severity
-        alerts_by_severity = {
-            'critical': [],
-            'warning': [],
-            'info': []
-        }
-        
-        for alert in active_alerts:
-            alerts_by_severity[alert.severity].append(asdict(alert))
-        
-        return {
-            'timestamp': datetime.now().isoformat(),
-            'total_alerts': len(active_alerts),
-            'alerts_by_severity': alerts_by_severity,
-            'recent_alerts': [asdict(alert) for alert in active_alerts[-10:]]
-        }
-    
-    def get_metrics_history(self, limit: int = 100) -> Dict[str, Any]:
-        """Get metrics history"""
-        return {
-            'timestamp': datetime.now().isoformat(),
-            'limit': limit,
-            'count': len(self.metrics_history),
-            'data': self.metrics_history[-limit:] if self.metrics_history else []
-        }
-    
-    def get_infrastructure_status(self) -> Dict[str, Any]:
-        """Get comprehensive infrastructure status"""
-        try:
-            metrics = self.collect_system_metrics()
-            
-            # Get container information
-            container_info = {}
-            try:
-                import docker
-                client = docker.from_env()
-                containers = client.containers.list(all=True)
-                
-                for container in containers:
-                    container_info[container.name] = {
-                        'status': container.status,
-                        'image': container.image.tags[0] if container.image.tags else 'unknown',
-                        'created': container.attrs['Created'],
-                        'ports': container.ports
+                    'total_records': len(recent_data),
+                    'avg_quality_score': np.mean(quality_scores),
+                    'min_quality_score': np.min(quality_scores),
+                    'max_quality_score': np.max(quality_scores),
+                    'time_range': {
+                        'start': min(timestamps).isoformat(),
+                        'end': max(timestamps).isoformat()
                     }
-                
-                CONTAINER_STATUS.info(container_info)
-            except ImportError:
-                container_info = {'error': 'Docker SDK not available'}
-            except Exception as e:
-                container_info = {'error': str(e)}
-            
-            return {
-                'timestamp': datetime.now().isoformat(),
-                'system_metrics': metrics,
-                'containers': container_info,
-                'alerts': {
-                    'active': len([a for a in self.alerts if not a.resolved]),
-                    'total': len(self.alerts)
                 },
-                'health_checks': {name: asdict(check) for name, check in self.health_checks.items()}
+                'trends': {
+                    'quality_trend': 'improving' if len(quality_scores) > 1 and quality_scores[-1] > quality_scores[0] else 'declining',
+                    'data_volume_trend': 'increasing' if len(recent_data) > 50 else 'stable'
+                },
+                'issues': {
+                    'low_quality_records': len([s for s in quality_scores if s < 70]),
+                    'validation_errors': sum(1 for d in recent_data if d.get('validation_errors', 0) > 0),
+                    'duplicate_warnings': sum(1 for d in recent_data if 'duplicate' in str(d.get('warnings', [])))
+                },
+                'drift_analysis': self.detect_data_drift()
             }
             
+            return report
+        
         except Exception as e:
-            self.logger.error(f"Error getting infrastructure status: {e}")
-            return {
-                'timestamp': datetime.now().isoformat(),
-                'error': str(e)
-            }
-    
-    def track_oracle_request(self, oracle_type: str, status: str, response_time: float = None):
-        """Track oracle request metrics"""
-        ORACLE_REQUEST_COUNT.labels(oracle_type=oracle_type, status=status).inc()
-        
-        if response_time:
-            # Track response time as a histogram
-            pass  # Would need to create oracle response time histogram
-    
-    def track_zk_proof(self, circuit_type: str, operation: str, status: str, verification_time: float = None):
-        """Track ZK proof metrics"""
-        ZK_PROOF_COUNT.labels(circuit_type=circuit_type, operation=operation, status=status).inc()
-        
-        if verification_time:
-            # Track verification time as a histogram
-            pass  # Would need to create ZK verification time histogram
-    
-    def track_database_query(self, query_type: str, duration: float):
-        """Track database query metrics"""
-        DATABASE_QUERY_DURATION.labels(query_type=query_type).observe(duration)
-    
-    def update_cache_hit_rate(self, hit_rate: float):
-        """Update cache hit rate metric"""
-        CACHE_HIT_RATE.set(hit_rate)
-    
-    def update_database_connections(self, connection_count: int):
-        """Update database connection count"""
-        DATABASE_CONNECTIONS.set(connection_count)
-    
-    def update_deployment_status(self, version: str, environment: str, status: str):
-        """Update deployment status"""
-        DEPLOYMENT_STATUS.info({
-            'version': version,
-            'environment': environment,
-            'status': status,
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    def track_storage_operation(self, operation: str, status: str, size_bytes: int = 0):
-        """Track storage operation metrics"""
-        STORAGE_OPERATIONS.labels(operation=operation, status=status).inc()
-        
-        if operation in ['upload', 'download'] and size_bytes > 0:
-            direction = 'upload' if operation == 'upload' else 'download'
-            STORAGE_BANDWIDTH.labels(direction=direction).inc(size_bytes)
-    
-    def track_cdn_request(self, status: str, cache_hit: bool, bandwidth_saved: int = 0):
-        """Track CDN request metrics"""
-        cache_status = 'hit' if cache_hit else 'miss'
-        CDN_REQUESTS.labels(status=status, cache_hit=cache_status).inc()
-        
-        if bandwidth_saved > 0:
-            CDN_BANDWIDTH_SAVED.inc(bandwidth_saved)
-    
-    def update_storage_cost(self, cost_usd: float):
-        """Update storage cost metric"""
-        STORAGE_COST.set(cost_usd)
-    
-    def update_cdn_cost_savings(self, savings_usd: float):
-        """Update CDN cost savings metric"""
-        CDN_COST_SAVINGS.set(savings_usd)
-    
-    def resolve_alert(self, alert_index: int):
-        """Resolve an alert"""
-        if 0 <= alert_index < len(self.alerts):
-            self.alerts[alert_index].resolved = True
-            self.alerts[alert_index].resolved_at = datetime.now()
+            return {'status': 'error', 'message': str(e)}
 
-# Global infrastructure monitor instance
-infrastructure_monitor = InfrastructureMonitor()
+# Global data quality monitor instance
+data_quality_monitor = DataQualityMonitor()
+
+def validate_data_quality(func):
+    """Decorator to validate data quality for API endpoints"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Get request data
+            request_data = {}
+            
+            # Extract data from request
+            if request.files:
+                request_data.update(request.files.to_dict())
+            if request.form:
+                request_data.update(request.form.to_dict())
+            if request.get_json():
+                request_data.update(request.get_json())
+            
+            # Add metadata
+            request_data['timestamp'] = datetime.now().isoformat()
+            request_data['ip_address'] = request.remote_addr
+            request_data['user_agent'] = request.headers.get('User-Agent', '')
+            
+            # Validate data quality
+            validation_result = data_quality_monitor.validate_request_data(request_data)
+            
+            # Store validation result in request context for later use
+            request.data_quality = validation_result
+            
+            # If data quality is too low, you might want to reject the request
+            if validation_result['quality_score'] < 30:
+                return {
+                    'error': 'Data quality too low',
+                    'quality_score': validation_result['quality_score'],
+                    'errors': validation_result['errors']
+                }, 400
+            
+            return func(*args, **kwargs)
+        
+        except Exception as e:
+            return {'error': f'Data quality validation failed: {str(e)}'}, 500
+    
+    return wrapper
+            
+        except Exception:
+            pass
+    
+    def detect_data_drift(self) -> Dict[str, Any]:
+        """Detect data drift using statistical methods"""
+        try:
+            if len(self.data_buffer) < 100:
+                return {'drift_detected': False, 'reason': 'Insufficient data'}
+            
+            # Get recent and historical data
+            recent_data = list(self.data_buffer)[-50:]  # Last 50 records
+            historical_data = list(self.data_buffer)[:-50]  # Everything before recent
+            
+            if len(historical_data) < 50:
+                return {'drift_detected': False, 'reason': 'Insufficient historical data'}
+            
+            # Compare quality scores
+            recent_scores = [d['quality_score'] for d in recent_data]
+            historical_scores = [d['quality_score'] for d in historical_data]
+            
+            # Statistical test for drift
+            recent_mean = np.mean(recent_scores)
+            historical_mean = np.mean(historical_scores)
+            
+            # Calculate drift score
+            drift_score = abs(recent_mean - historical_mean) / max(historical_mean, 1)
+            
+            # Update drift metric
+            DATA_DRIFT_SCORE.set(drift_score)
+            
+            drift_detected = drift_score > 0.15  # 15% change threshold
+            
+            
+            # Get recent and historical data
+            recent_data = list(self.data_buffer)[-50:]  # Last 50 records
+            historical_data = list(self.data_buffer)[:-50]  # Everything before recent
+            
+            if len(historical_data) < 50:
+                return {'drift_detected': False, 'reason': 'Insufficient historical data'}
+            
+            # Compare quality scores
+            recent_scores = [d['quality_score'] for d in recent_data]
+            historical_scores = [d['quality_score'] for d in historical_data]
+            
+            # Statistical test for drift
+            recent_mean = np.mean(recent_scores)
+            historical_mean = np.mean(historical_scores)
+            
+            # Calculate drift score
+            drift_score = abs(recent_mean - historical_mean) / max(historical_mean, 1)
+            
+            # Update drift metric
+            DATA_DRIFT_SCORE.set(drift_score)
+            
+            drift_detected = drift_score > 0.15  # 15% change threshold
+            
+            return {
+                'drift_detected': drift_detected,
+                'drift_score': drift_score,
+                'recent_mean': recent_mean,
+                'historical_mean': historical_mean,
+                'sample_sizes': {'recent': len(recent_data), 'historical': len(historical_data)}
+            }
+        
+        except Exception as e:
+            return {'drift_detected': False, 'error': str(e)}
+    
+    def get_quality_report(self) -> Dict[str, Any]:
+        """Generate comprehensive data quality report"""
+        try:
+            if not self.data_buffer:
+                return {'status': 'no_data', 'message': 'No data available for analysis'}
+            
+            recent_data = list(self.data_buffer)[-100:]  # Last 100 records
+            
+            # Calculate statistics
+            quality_scores = [d['quality_score'] for d in recent_data]
+            timestamps = [d['timestamp'] for d in recent_data]
+            
+            report = {
+                'summary': {
+                    'total_records': len(recent_data),
+                    'avg_quality_score': np.mean(quality_scores),
+                    'min_quality_score': np.min(quality_scores),
+                    'max_quality_score': np.max(quality_scores),
+                    'time_range': {
+                        'start': min(timestamps).isoformat(),
+                        'end': max(timestamps).isoformat()
+                    }
+                },
+                'trends': {
+                    'quality_trend': 'improving' if len(quality_scores) > 1 and quality_scores[-1] > quality_scores[0] else 'declining',
+                    'data_volume_trend': 'increasing' if len(recent_data) > 50 else 'stable'
+                },
+                'issues': {
+                    'low_quality_records': len([s for s in quality_scores if s < 70]),
+                    'validation_errors': sum(1 for d in recent_data if d.get('validation_errors', 0) > 0),
+                    'duplicate_warnings': sum(1 for d in recent_data if 'duplicate' in str(d.get('warnings', [])))
+                },
+                'drift_analysis': self.detect_data_drift()
+            }
+            
+            return report
+        
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+# Global data quality monitor instance
+data_quality_monitor = DataQualityMonitor()
+
+def validate_data_quality(func):
+    """Decorator to validate data quality for API endpoints"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Get request data
+            request_data = {}
+            
+            # Extract data from request
+            if request.files:
+                request_data.update(request.files.to_dict())
+            if request.form:
+                request_data.update(request.form.to_dict())
+            if request.get_json():
+                request_data.update(request.get_json())
+            
+            # Add metadata
+            request_data['timestamp'] = datetime.now().isoformat()
+            request_data['ip_address'] = request.remote_addr
+            request_data['user_agent'] = request.headers.get('User-Agent', '')
+            
+            # Validate data quality
+            validation_result = data_quality_monitor.validate_request_data(request_data)
+            
+            # Store validation result in request context for later use
+            request.data_quality = validation_result
+            
+            # If data quality is too low, you might want to reject the request
+            if validation_result['quality_score'] < 30:
+                return {
+                    'error': 'Data quality too low',
+                    'quality_score': validation_result['quality_score'],
+                    'errors': validation_result['errors']
+                }, 400
+            
+            return func(*args, **kwargs)
+        
+        except Exception as e:
+            return {'error': f'Data quality validation failed: {str(e)}'}, 500
+    
+    return wrapper
+            
+            # Get recent and historical data
+            recent_data = list(self.data_buffer)[-50:]  # Last 50 records
+            historical_data = list(self.data_buffer)[:-50]  # Everything before recent
+            
+            if len(historical_data) < 50:
+                return {'drift_detected': False, 'reason': 'Insufficient historical data'}
+            
+            # Compare quality scores
+            recent_scores = [d['quality_score'] for d in recent_data]
+            historical_scores = [d['quality_score'] for d in historical_data]
+            
+            # Statistical test for drift
+            recent_mean = np.mean(recent_scores)
+            historical_mean = np.mean(historical_scores)
+            
+            # Calculate drift score
+            drift_score = abs(recent_mean - historical_mean) / max(historical_mean, 1)
+            
+            # Update drift metric
+            DATA_DRIFT_SCORE.set(drift_score)
+            
+            drift_detected = drift_score > 0.15  # 15% change threshold
+            
+            return {
+                'drift_detected': drift_detected,
+                'drift_score': drift_score,
+                'recent_mean': recent_mean,
+                'historical_mean': historical_mean,
+                'sample_sizes': {'recent': len(recent_data), 'historical': len(historical_data)}
+            }
+        
+        except Exception as e:
+            return {'drift_detected': False, 'error': str(e)}
+    
+    def get_quality_report(self) -> Dict[str, Any]:
+        """Generate comprehensive data quality report"""
+        try:
+            if not self.data_buffer:
+                return {'status': 'no_data', 'message': 'No data available for analysis'}
+            
+            recent_data = list(self.data_buffer)[-100:]  # Last 100 records
+            
+            # Calculate statistics
+            quality_scores = [d['quality_score'] for d in recent_data]
+            timestamps = [d['timestamp'] for d in recent_data]
+            
+            report = {
+                'summary': {
+                    'total_records': len(recent_data),
+                    'avg_quality_score': np.mean(quality_scores),
+                    'min_quality_score': np.min(quality_scores),
+                    'max_quality_score': np.max(quality_scores),
+                    'time_range': {
+                        'start': min(timestamps).isoformat(),
+                        'end': max(timestamps).isoformat()
+                    }
+                },
+                'trends': {
+                    'quality_trend': 'improving' if len(quality_scores) > 1 and quality_scores[-1] > quality_scores[0] else 'declining',
+                    'data_volume_trend': 'increasing' if len(recent_data) > 50 else 'stable'
+                },
+                'issues': {
+                    'low_quality_records': len([s for s in quality_scores if s < 70]),
+                    'validation_errors': sum(1 for d in recent_data if d.get('validation_errors', 0) > 0),
+                    'duplicate_warnings': sum(1 for d in recent_data if 'duplicate' in str(d.get('warnings', [])))
+                },
+                'drift_analysis': self.detect_data_drift()
+            }
+            
+            return report
+        
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+# Global data quality monitor instance
+data_quality_monitor = DataQualityMonitor()
+
+def validate_data_quality(func):
+    """Decorator to validate data quality for API endpoints"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Get request data
+            request_data = {}
+            
+            # Extract data from request
+            if request.files:
+                request_data.update(request.files.to_dict())
+            if request.form:
+                request_data.update(request.form.to_dict())
+            if request.get_json():
+                request_data.update(request.get_json())
+            
+            # Add metadata
+            request_data['timestamp'] = datetime.now().isoformat()
+            request_data['ip_address'] = request.remote_addr
+            request_data['user_agent'] = request.headers.get('User-Agent', '')
+            
+            # Validate data quality
+            validation_result = data_quality_monitor.validate_request_data(request_data)
+            
+            # Store validation result in request context for later use
+            request.data_quality = validation_result
+            
+            # If data quality is too low, you might want to reject the request
+            if validation_result['quality_score'] < 30:
+                return {
+                    'error': 'Data quality too low',
+                    'quality_score': validation_result['quality_score'],
+                    'errors': validation_result['errors']
+                }, 400
+            
+            return func(*args, **kwargs)
+        
+        except Exception as e:
+            return {'error': f'Data quality validation failed: {str(e)}'}, 500
+    
+    return wrapper
+            
+            return report
+        
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+# Global data quality monitor instance
+data_quality_monitor = DataQualityMonitor()
+
+def validate_data_quality(func):
+    """Decorator to validate data quality for API endpoints"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Get request data
+            request_data = {}
+            
+            # Extract data from request
+            if request.files:
+                request_data.update(request.files.to_dict())
+            if request.form:
+                request_data.update(request.form.to_dict())
+            if request.get_json():
+                request_data.update(request.get_json())
+            
+            # Add metadata
+            request_data['timestamp'] = datetime.now().isoformat()
+            request_data['ip_address'] = request.remote_addr
+            request_data['user_agent'] = request.headers.get('User-Agent', '')
+            
+            # Validate data quality
+            validation_result = data_quality_monitor.validate_request_data(request_data)
+            
+            # Store validation result in request context for later use
+            request.data_quality = validation_result
+            
+            # If data quality is too low, you might want to reject the request
+            if validation_result['quality_score'] < 30:
+                return {
+                    'error': 'Data quality too low',
+                    'quality_score': validation_result['quality_score'],
+                    'errors': validation_result['errors']
+                }, 400
+            
+            return func(*args, **kwargs)
+        
+        except Exception as e:
+            return {'error': f'Data quality validation failed: {str(e)}'}, 500
+    
+    return wrapper
+                handler(alert)
+            except Exception as e:
+                logger.error(f"Error in alert handler: {e}")
+
+class QueueMonitor:
+    """Comprehensive queue monitoring system"""
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+        self.metrics_collector = MetricsCollector(
+            max_history=self.config.get('max_history', 10000)
+        )
+        self.alert_manager = AlertManager()
+        
+        # Queue metrics tracking
+        self._queue_metrics: Dict[str, QueueMetrics] = {}
+        self._lock = threading.RLock()
+        
+        # Performance tracking
+        self._performance_window = deque(maxlen=1000)  # Last 1000 operations
+        
+        # Monitoring thread
+        self._monitoring_active = False
+        self._monitoring_thread = None
+        
+        # Setup default alerts
+        self._setup_default_alerts()
+    
+    def _setup_default_alerts(self):
+        """Setup default alert rules"""
+        default_alerts = [
+            Alert(
+                name="high_queue_size",
+                level=AlertLevel.WARNING,
+                condition="queue_size >",
+                threshold=1000,
+                message="Queue size is getting large"
+            ),
+            Alert(
+                name="high_error_rate",
+                level=AlertLevel.ERROR,
+                condition="error_rate >",
+                threshold=10.0,
+                message="Error rate is too high"
+            ),
+            Alert(
+                name="low_throughput",
+                level=AlertLevel.WARNING,
+                condition="throughput <",
+                threshold=1.0,
+                message="Queue throughput is too low"
+            ),
+            Alert(
+                name="high_processing_time",
+                level=AlertLevel.WARNING,
+                condition="avg_processing_time >",
+                threshold=30000,  # 30 seconds in ms
+                message="Average processing time is too high"
+            ),
+            # Rate limiting alerts
+            Alert(
+                name="high_rate_limit_violations",
+                level=AlertLevel.WARNING,
+                condition="rate_limit_violations >",
+                threshold=100,
+                message="High rate limit violation rate detected"
+            ),
+            Alert(
+                name="many_blocked_users",
+                level=AlertLevel.ERROR,
+                condition="blocked_users >",
+                threshold=50,
+                message="Too many users are blocked"
+            ),
+            Alert(
+                name="rate_limit_bypass_usage",
+                level=AlertLevel.INFO,
+                condition="bypass_usage >",
+                threshold=10,
+                message="High rate limit bypass usage detected"
+            )
+        ]
+        
+        for alert in default_alerts:
+            self.alert_manager.add_alert(alert)
+    
+    def start_monitoring(self, interval_seconds: int = 30):
+        """Start background monitoring"""
+        if self._monitoring_active:
+            return
+        
+        self._monitoring_active = True
+        self._monitoring_thread = threading.Thread(
+            target=self._monitoring_loop,
+            args=(interval_seconds,),
+            daemon=True
+        )
+        self._monitoring_thread.start()
+        logger.info("Queue monitoring started")
+    
+    def stop_monitoring(self):
+        """Stop background monitoring"""
+        self._monitoring_active = False
+        if self._monitoring_thread:
+            self._monitoring_thread.join(timeout=5)
+        logger.info("Queue monitoring stopped")
+    
+    def _monitoring_loop(self, interval_seconds: int):
+        """Background monitoring loop"""
+        while self._monitoring_active:
+            try:
+                self._collect_metrics()
+                self.alert_manager.check_alerts(self.metrics_collector)
+                time.sleep(interval_seconds)
+            except Exception as e:
+                logger.error(f"Monitoring loop error: {e}")
+                time.sleep(5)
+    
+    def _collect_metrics(self):
+        """Collect current metrics from all queues"""
+        with self._lock:
+            for queue_name, metrics in self._queue_metrics.items():
+                labels = {"queue": queue_name}
+                
+                # Record queue metrics
+                self.metrics_collector.set_gauge("queue_size", metrics.pending_tasks, labels)
+                self.metrics_collector.set_gauge("running_tasks", metrics.running_tasks, labels)
+                self.metrics_collector.set_gauge("completed_tasks", metrics.completed_tasks, labels)
+                self.metrics_collector.set_gauge("failed_tasks", metrics.failed_tasks, labels)
+                self.metrics_collector.set_gauge("error_rate", metrics.error_rate, labels)
+                self.metrics_collector.set_gauge("throughput", metrics.throughput, labels)
+                self.metrics_collector.set_gauge("avg_wait_time", metrics.average_wait_time, labels)
+                self.metrics_collector.set_gauge("avg_processing_time", metrics.average_processing_time, labels)
+            
+            # Collect rate limiting metrics if available
+            try:
+                from security_config import get_rate_limiter
+                rate_limiter = get_rate_limiter()
+                rate_limit_stats = rate_limiter.get_analytics(1)  # Last hour
+                
+                # Rate limiting metrics
+                rate_limit_analytics = rate_limit_stats.get('rate_limit_analytics', {})
+                current_stats = rate_limit_analytics.get('current_stats', {})
+                
+                self.metrics_collector.set_gauge("rate_limit_total_requests", current_stats.get('total_requests', 0))
+                self.metrics_collector.set_gauge("rate_limit_blocked_requests", current_stats.get('blocked_requests', 0))
+                self.metrics_collector.set_gauge("rate_limit_active_clients", rate_limit_stats.get('active_clients', 0))
+                self.metrics_collector.set_gauge("rate_limit_blocked_clients", rate_limit_stats.get('blocked_clients', 0))
+                
+                # Calculate violation rate
+                total_requests = current_stats.get('total_requests', 0)
+                blocked_requests = current_stats.get('blocked_requests', 0)
+                violation_rate = (blocked_requests / total_requests * 100) if total_requests > 0 else 0
+                self.metrics_collector.set_gauge("rate_limit_violation_rate", violation_rate)
+                
+                # Dynamic adjustment metrics
+                dynamic_adjustments = rate_limit_stats.get('dynamic_adjustments', {})
+                for user_type, adjustment_stats in dynamic_adjustments.items():
+                    labels = {"user_type": user_type}
+                    self.metrics_collector.set_gauge("rate_limit_load_factor", 
+                                                    adjustment_stats.get('current_load_factor', 1.0), labels)
+                
+            except Exception as e:
+                logger.debug(f"Could not collect rate limiting metrics: {e}")
+    
+    def update_queue_metrics(self, queue_name: str, **kwargs):
+        """Update metrics for a specific queue"""
+        with self._lock:
+            if queue_name not in self._queue_metrics:
+                self._queue_metrics[queue_name] = QueueMetrics(queue_name=queue_name)
+            
+            metrics = self._queue_metrics[queue_name]
+            
+            # Update metrics
+            for key, value in kwargs.items():
+                if hasattr(metrics, key):
+                    setattr(metrics, key, value)
+            
+            metrics.last_updated = datetime.now()
+            
+            # Record performance data
+            self._record_performance(queue_name, metrics)
+    
+    def _record_performance(self, queue_name: str, metrics: QueueMetrics):
+        """Record performance data point"""
+        performance_data = {
+            'timestamp': datetime.now(),
+            'queue': queue_name,
+            'throughput': metrics.throughput,
+            'error_rate': metrics.error_rate,
+            'avg_processing_time': metrics.average_processing_time,
+            'pending_tasks': metrics.pending_tasks
+        }
+        
+        self._performance_window.append(performance_data)
+    
+    def record_task_event(self, queue_name: str, event_type: str, duration_ms: Optional[float] = None):
+        """Record task-related events"""
+        labels = {"queue": queue_name, "event": event_type}
+        
+        if event_type == "completed":
+            self.metrics_collector.record_counter("tasks_completed", 1.0, labels)
+            if duration_ms is not None:
+                self.metrics_collector.record_timer("task_duration", duration_ms, labels)
+        elif event_type == "failed":
+            self.metrics_collector.record_counter("tasks_failed", 1.0, labels)
+        elif event_type == "started":
+            self.metrics_collector.record_counter("tasks_started", 1.0, labels)
+        elif event_type == "queued":
+            self.metrics_collector.record_counter("tasks_queued", 1.0, labels)
+    
+    def get_queue_metrics(self, queue_name: str) -> Optional[QueueMetrics]:
+        """Get metrics for a specific queue"""
+        with self._lock:
+            return self._queue_metrics.get(queue_name)
+    
+    def get_all_queue_metrics(self) -> Dict[str, QueueMetrics]:
+        """Get metrics for all queues"""
+        with self._lock:
+            return self._queue_metrics.copy()
+    
+    def get_performance_summary(self, hours: int = 24) -> Dict[str, Any]:
+        """Get performance summary for the last N hours"""
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        
+        # Filter performance data
+        recent_data = [
+            data for data in self._performance_window
+            if data['timestamp'] >= cutoff_time
+        ]
+        
+        if not recent_data:
+            return {}
+        
+        # Calculate summary statistics
+        throughputs = [data['throughput'] for data in recent_data]
+        error_rates = [data['error_rate'] for data in recent_data]
+        processing_times = [data['avg_processing_time'] for data in recent_data]
+        
+        return {
+            'period_hours': hours,
+            'total_data_points': len(recent_data),
+            'throughput': {
+                'avg': statistics.mean(throughputs),
+                'min': min(throughputs),
+                'max': max(throughputs),
+                'median': statistics.median(throughputs)
+            },
+            'error_rate': {
+                'avg': statistics.mean(error_rates),
+                'min': min(error_rates),
+                'max': max(error_rates),
+                'median': statistics.median(error_rates)
+            },
+            'processing_time': {
+                'avg': statistics.mean(processing_times),
+                'min': min(processing_times),
+                'max': max(processing_times),
+                'median': statistics.median(processing_times)
+            }
+        }
+    
+    def get_queue_analytics(self, queue_name: str, hours: int = 24) -> Dict[str, Any]:
+        """Get detailed analytics for a specific queue"""
+        metrics = self.get_queue_metrics(queue_name)
+        if not metrics:
+            return {}
+        
+        # Get task duration percentiles
+        duration_percentiles = self.metrics_collector.calculate_percentiles(
+            "task_duration", labels={"queue": queue_name}
+        )
+        
+        # Get task counts by event type
+        task_events = {}
+        for event_type in ["completed", "failed", "started", "queued"]:
+            history = self.metrics_collector.get_metric_history(
+                "tasks_completed" if event_type == "completed" else f"tasks_{event_type}",
+                labels={"queue": queue_name}
+            )
+            task_events[event_type] = len(history)
+        
+        return {
+            'queue_name': queue_name,
+            'current_metrics': {
+                'pending_tasks': metrics.pending_tasks,
+                'running_tasks': metrics.running_tasks,
+                'completed_tasks': metrics.completed_tasks,
+                'failed_tasks': metrics.failed_tasks,
+                'error_rate': metrics.error_rate,
+                'throughput': metrics.throughput,
+                'avg_wait_time': metrics.average_wait_time,
+                'avg_processing_time': metrics.average_processing_time
+            },
+            'task_events': task_events,
+            'duration_percentiles': duration_percentiles,
+            'last_updated': metrics.last_updated.isoformat()
+        }
+    
+    def export_metrics(self, format: str = "json") -> str:
+        """Export metrics in specified format"""
+        all_metrics = self.metrics_collector.get_current_metrics()
+        
+        if format.lower() == "json":
+            return json.dumps(all_metrics, indent=2, default=str)
+        elif format.lower() == "prometheus":
+            return self._export_prometheus_format(all_metrics)
+        else:
+            raise ValueError(f"Unsupported export format: {format}")
+    
+    def _export_prometheus_format(self, metrics: Dict[str, Any]) -> str:
+        """Export metrics in Prometheus format"""
+        lines = []
+        
+        for metric_name, metric_data in metrics.items():
+            metric_type = metric_data["type"]
+            value = metric_data["value"]
+            
+            # Add metric type
+            if metric_type == "counter":
+                lines.append(f"# TYPE {metric_name} counter")
+            elif metric_type == "gauge":
+                lines.append(f"# TYPE {metric_name} gauge")
+            
+            # Add metric value
+            lines.append(f"{metric_name} {value}")
+        
+        return "\n".join(lines)
+    
+    def reset_metrics(self):
+        """Reset all metrics"""
+        with self._lock:
+            self.metrics_collector = MetricsCollector(
+                max_history=self.config.get('max_history', 10000)
+            )
+            self._queue_metrics.clear()
+            self._performance_window.clear()
+        
+        logger.info("All metrics reset")
+
+# Alert handlers
+def console_alert_handler(alert: Alert):
+    """Simple console alert handler"""
+    print(f"[{alert.level.value.upper()}] {alert.name}: {alert.message}")
+
+def log_alert_handler(alert: Alert):
+    """Logging alert handler"""
+    if alert.level == AlertLevel.INFO:
+        logger.info(f"Alert: {alert.name} - {alert.message}")
+    elif alert.level == AlertLevel.WARNING:
+        logger.warning(f"Alert: {alert.name} - {alert.message}")
+    elif alert.level == AlertLevel.ERROR:
+        logger.error(f"Alert: {alert.name} - {alert.message}")
+    elif alert.level == AlertLevel.CRITICAL:
+        logger.critical(f"Alert: {alert.name} - {alert.message}")
+
+class QueueDashboard:
+    """Simple dashboard data provider for queue monitoring"""
+    
+    def __init__(self, monitor: QueueMonitor):
+        self.monitor = monitor
+    
+    def get_dashboard_data(self) -> Dict[str, Any]:
+        """Get data for dashboard display"""
+        queue_metrics = self.monitor.get_all_queue_metrics()
+        performance_summary = self.monitor.get_performance_summary()
+        
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'queues': {
+                name: {
+                    'pending_tasks': metrics.pending_tasks,
+                    'running_tasks': metrics.running_tasks,
+                    'completed_tasks': metrics.completed_tasks,
+                    'failed_tasks': metrics.failed_tasks,
+                    'error_rate': metrics.error_rate,
+                    'throughput': metrics.throughput,
+                    'avg_processing_time': metrics.average_processing_time
+                }
+                for name, metrics in queue_metrics.items()
+            },
+            'performance_summary': performance_summary,
+            'total_queues': len(queue_metrics),
+            'monitoring_active': self.monitor._monitoring_active
+        }

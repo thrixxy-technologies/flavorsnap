@@ -1,0 +1,28 @@
+{
+  "name": "flavorsnap",
+  "version": "1.0.0",
+  "description": "AI-Powered Food Classification Web Application",
+  "scripts": {
+    "test:e2e": "cypress run",
+    "test:e2e:open": "cypress open",
+    "test:e2e:chrome": "cypress run --browser chrome",
+    "test:e2e:firefox": "cypress run --browser firefox",
+    "test:e2e:headed": "cypress run --headed",
+    "test:e2e:ci": "cypress run --config video=true --reporter junit --reporter-options mochaFile=test-results/e2e/results-[hash].xml",
+    "test:e2e:mobile": "cypress run --config viewportWidth=375,viewportHeight=667",
+    "test:e2e:tablet": "cypress run --config viewportWidth=768,viewportHeight=1024"
+  },
+  "devDependencies": {
+    "cypress": "^13.6.0",
+    "cypress-file-upload": "^5.0.8"
+  },
+  "keywords": [
+    "food-classification",
+    "ai",
+    "machine-learning",
+    "nextjs",
+    "pytorch"
+  ],
+  "author": "FlavorSnap Team",
+  "license": "MIT"
+}

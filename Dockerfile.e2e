@@ -1,0 +1,31 @@
+# Dockerfile for E2E Testing with Cypress
+FROM cypress/browsers:node-20.11.0-chrome-121.0.6167.85-1-ff-120.0-edge-121.0.2277.83-1
+
+# Set working directory
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci
+
+# Copy Cypress configuration and tests
+COPY cypress.config.js ./
+COPY tests/e2e ./tests/e2e
+
+# Copy test fixtures
+COPY tests/e2e/fixtures ./tests/e2e/fixtures
+
+# Create directories for test results
+RUN mkdir -p test-results/e2e tests/e2e/screenshots tests/e2e/videos
+
+# Set environment variables
+ENV CYPRESS_baseUrl=http://frontend:3000
+ENV CYPRESS_apiUrl=http://backend:5000
+ENV CYPRESS_apiV1Url=http://backend:8000/api/v1
+ENV CI=true
+
+# Verify Cypress installation
+RUN npx cypress verify
+
+# Default command
+CMD ["npx", "cypress", "run", "--browser", "chrome", "--config", "video=true"]

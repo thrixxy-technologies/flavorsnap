@@ -1,0 +1,393 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Code Quality and Testing
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r ml-model-api/requirements.txt
+        pip install pytest pytest-cov black flake8 mypy
+
+    - name: Lint with flake8
+      run: |
+        flake8 ml-model-api/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 ml-model-api/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Format check with black
+      run: |
+        black --check ml-model-api/
+
+    - name: Type check with mypy
+      run: |
+        mypy ml-model-api/ --ignore-missing-imports
+
+    - name: Run tests
+      run: |
+        cd ml-model-api
+        python run_tests.py --coverage
+      env:
+        DATABASE_URL: postgresql://postgres:testpass@localhost:5432/testdb
+        REDIS_URL: redis://localhost:6379/0
+        FLASK_ENV: testing
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./ml-model-api/coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # Security Scanning
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Bandit security linter
+      run: |
+        pip install bandit
+        bandit -r ml-model-api/ -f json -o bandit-report.json
+
+    - name: Upload Bandit results
+      uses: actions/upload-artifact@v3
+      with:
+        name: bandit-report
+        path: bandit-report.json
+
+  # Build Docker Image
+  build:
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./ml-model-api/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Deploy to Staging
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Deploy to staging
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Update deployment with new image
+        kubectl set image deployment/flavorsnap-staging \
+          flavorsnap=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          -n flavorsnap-staging
+        
+        # Wait for rollout
+        kubectl rollout status deployment/flavorsnap-staging -n flavorsnap-staging --timeout=300s
+        
+        # Run health checks
+        kubectl wait --for=condition=ready pod -l app=flavorsnap-staging -n flavorsnap-staging --timeout=60s
+
+    - name: Run integration tests
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Get service URL
+        SERVICE_URL=$(kubectl get service flavorsnap-staging -n flavorsnap-staging -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        # Run health check
+        curl -f http://$SERVICE_URL/health || exit 1
+        
+        # Run smoke tests
+        curl -f http://$SERVICE_URL/config || exit 1
+
+  # Deploy to Production (Blue-Green)
+  deploy-production:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Deploy to production (Blue-Green)
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Get current active deployment
+        CURRENT_DEPLOYMENT=$(kubectl get service flavorsnap-prod -n flavorsnap-prod -o jsonpath='{.spec.selector.color}' || echo "blue")
+        
+        # Determine target color
+        if [ "$CURRENT_DEPLOYMENT" = "blue" ]; then
+          TARGET_COLOR="green"
+        else
+          TARGET_COLOR="blue"
+        fi
+        
+        echo "Deploying to $TARGET_COLOR environment"
+        
+        # Update target deployment
+        kubectl set image deployment/flavorsnap-$TARGET_COLOR \
+          flavorsnap=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          -n flavorsnap-prod
+        
+        # Wait for rollout
+        kubectl rollout status deployment/flavorsnap-$TARGET_COLOR -n flavorsnap-prod --timeout=600s
+        
+        # Run health checks on new deployment
+        kubectl wait --for=condition=ready pod -l color=$TARGET_COLOR -n flavorsnap-prod --timeout=120s
+        
+        # Get pod IP for health check
+        POD_IP=$(kubectl get pod -l color=$TARGET_COLOR -n flavorsnap-prod -o jsonpath='{.items[0].status.podIP}')
+        
+        # Run comprehensive health checks
+        for i in {1..5}; do
+          if curl -f --max-time 10 http://$POD_IP:5000/health; then
+            echo "Health check $i passed"
+            sleep 10
+          else
+            echo "Health check $i failed"
+            exit 1
+          fi
+        done
+        
+        # Switch traffic to new deployment
+        kubectl patch service flavorsnap-prod -n flavorsnap-prod -p '{"spec":{"selector":{"color":"'$TARGET_COLOR'"}}}'
+        
+        echo "Traffic switched to $TARGET_COLOR deployment"
+
+    - name: Post-deployment verification
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Get service URL
+        SERVICE_URL=$(kubectl get service flavorsnap-prod -n flavorsnap-prod -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        # Run smoke tests
+        curl -f http://$SERVICE_URL/health || exit 1
+        curl -f http://$SERVICE_URL/config || exit 1
+        
+        # Test prediction endpoint
+        echo "Testing prediction endpoint..."
+        # Add actual test here if needed
+
+    - name: Cleanup old deployment
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Get current active deployment
+        CURRENT_DEPLOYMENT=$(kubectl get service flavorsnap-prod -n flavorsnap-prod -o jsonpath='{.spec.selector.color}')
+        
+        # Scale down the inactive deployment after verification
+        if [ "$CURRENT_DEPLOYMENT" = "blue" ]; then
+          INACTIVE_COLOR="green"
+        else
+          INACTIVE_COLOR="blue"
+        fi
+        
+        echo "Scaling down $INACTIVE_COLOR deployment"
+        kubectl scale deployment flavorsnap-$INACTIVE_COLOR --replicas=0 -n flavorsnap-prod
+
+  # Rollback on failure
+  rollback:
+    needs: deploy-production
+    runs-on: ubuntu-latest
+    if: failure() && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Automatic rollback
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Get current active deployment
+        CURRENT_DEPLOYMENT=$(kubectl get service flavorsnap-prod -n flavorsnap-prod -o jsonpath='{.spec.selector.color}')
+        
+        # Determine rollback target
+        if [ "$CURRENT_DEPLOYMENT" = "blue" ]; then
+          ROLLBACK_COLOR="green"
+        else
+          ROLLBACK_COLOR="blue"
+        fi
+        
+        echo "Rolling back to $ROLLBACK_COLOR deployment"
+        
+        # Scale up rollback deployment
+        kubectl scale deployment flavorsnap-$ROLLBACK_COLOR --replicas=3 -n flavorsnap-prod
+        
+        # Wait for rollout
+        kubectl rollout status deployment/flavorsnap-$ROLLBACK_COLOR -n flavorsnap-prod --timeout=300s
+        
+        # Switch traffic back
+        kubectl patch service flavorsnap-prod -n flavorsnap-prod -p '{"spec":{"selector":{"color":"'$ROLLBACK_COLOR'"}}}'
+        
+        echo "Rollback completed"
+
+  # Monitoring and Alerting
+  monitoring:
+    needs: [deploy-staging, deploy-production]
+    runs-on: ubuntu-latest
+    if: always() && (needs.deploy-staging.result == 'success' || needs.deploy-production.result == 'success')
+
+    steps:
+    - name: Notify deployment status
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+
+    - name: Update deployment metrics
+      run: |
+        # Send deployment metrics to monitoring system
+        curl -X POST "${{ secrets.METRICS_ENDPOINT }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "deployment": {
+              "commit": "${{ github.sha }}",
+              "branch": "${{ github.ref_name }}",
+              "status": "${{ job.status }}",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }
+          }' || echo "Failed to send metrics"

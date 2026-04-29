@@ -2,7 +2,15 @@
 resolver = "2"
 members = [
     "flavorsnap-food-registry",
+    "contracts/shared",
+    "contracts/model-governance",
+    "contracts/tokenized-incentive",
+    "contracts/sensory-evaluation",
+    "contracts/example-contract",
 ]
+
+[workspace.dependencies]
+soroban-sdk = "20.0.0"
 
 [profile.release]
 opt-level = "z"

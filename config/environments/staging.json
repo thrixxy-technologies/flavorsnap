@@ -1,0 +1,53 @@
+{
+  "app": {
+    "name": "FlavorSnap",
+    "version": "0.1.0",
+    "environment": "staging",
+    "debug": false,
+    "hotReload": false
+  },
+  "api": {
+    "baseUrl": "https://staging-api.flavorsnap.com/api",
+    "timeout": 30000,
+    "retries": 3
+  },
+  "database": {
+    "url": "${DATABASE_URL}",
+    "poolSize": 20,
+    "ssl": true
+  },
+  "stellar": {
+    "network": "testnet",
+    "rpcUrl": "https://soroban-testnet.stellar.org",
+    "contractId": "${CONTRACT_ID}"
+  },
+  "ml": {
+    "modelPath": "models/best_model.pth",
+    "classesPath": "food_classes.txt",
+    "confidenceThreshold": 0.8
+  },
+  "upload": {
+    "maxFileSize": 10485760,
+    "uploadDir": "uploads",
+    "allowedTypes": ["jpg", "jpeg", "png", "gif"],
+    "tempDir": "temp"
+  },
+  "security": {
+    "jwtExpiry": "12h",
+    "bcryptRounds": 12,
+    "rateLimitWindow": 900000,
+    "rateLimitMax": 200
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "colorize": false,
+    "timestamp": true
+  },
+  "features": {
+    "mlClassification": true,
+    "blockchainIntegration": true,
+    "analytics": true,
+    "cacheEnabled": true
+  }
+}

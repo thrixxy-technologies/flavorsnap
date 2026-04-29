@@ -1,778 +1,523 @@
-"""
-Model Deployment and Rollback System for FlavorSnap
-Handles safe model deployment with automatic rollback capabilities
-"""
-
 import os
-import shutil
+import sys
 import json
-import sqlite3
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
-from pathlib import Path
-import torch
+import time
+import subprocess
 import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+from dataclasses import dataclass, asdict
+import docker
+import requests
+from pathlib import Path
 
-from model_registry import ModelRegistry, ModelMetadata
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config_manager import get_config, get_config_value
+from logger_config import get_logger
+
+class DeploymentStatus(Enum):
+    PENDING = "pending"
+    BUILDING = "building"
+    TESTING = "testing"
+    DEPLOYING = "deploying"
+    HEALTH_CHECKING = "health_checking"
+    ACTIVE = "active"
+    FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
+
+class Environment(Enum):
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
 
 @dataclass
 class DeploymentConfig:
-    """Configuration for model deployment"""
-    auto_rollback: bool = True
-    rollback_threshold: float = 0.05  # 5% performance drop
-    monitoring_window: int = 100  # Number of predictions to monitor
-    health_check_interval: int = 60  # seconds
-    backup_models: bool = True
-    max_backup_count: int = 5
-
+    image_name: str
+    image_tag: str
+    environment: Environment
+    port: int
+    health_check_url: str
+    health_check_interval: int = 30
+    health_check_timeout: int = 10
+    health_check_retries: int = 3
+    rollback_threshold: float = 0.5  # Error rate threshold for auto-rollback
+    zero_downtime: bool = True
 
 @dataclass
-class DeploymentEvent:
-    """Record of a deployment event"""
-    timestamp: str
-    event_type: str  # deploy, rollback, health_check
-    model_version: str
-    previous_version: Optional[str] = None
-    success: bool = True
-    message: str = ""
-    metrics: Dict[str, Any] = None
+class DeploymentRecord:
+    id: str
+    config: DeploymentConfig
+    status: DeploymentStatus
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    container_id: Optional[str] = None
+    error_message: Optional[str] = None
+    health_check_results: List[Dict[str, Any]] = None
+    rollback_reason: Optional[str] = None
 
+class DeploymentManager:
+    def __init__(self):
+        self.logger = get_logger(__name__)
+        self.config = get_config()
+        self.docker_client = None
+        self.deployments: Dict[str, DeploymentRecord] = {}
+        self.active_deployment: Optional[str] = None
+        self.blue_deployment: Optional[str] = None
+        self.green_deployment: Optional[str] = None
+        self.health_check_thread = None
+        self.monitoring_active = False
+        
+        try:
+            self.docker_client = docker.from_env()
+            self.logger.info("Docker client initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Docker client: {e}")
+            raise
 
-class ModelDeploymentManager:
-    """Manages model deployment with rollback capabilities"""
-    
-    def __init__(self, 
-                 model_registry: ModelRegistry,
-                 deployment_config: DeploymentConfig = None,
-                 registry_path: str = "model_registry.db"):
-        self.model_registry = model_registry
-        self.config = deployment_config or DeploymentConfig()
-        self.registry_path = registry_path
-        self.deployment_dir = Path("deployments")
-        self.backup_dir = Path("model_backups")
+    def create_deployment_config(self, **kwargs) -> DeploymentConfig:
+        """Create deployment configuration from parameters"""
+        defaults = {
+            'image_name': get_config_value('deployment.image_name', 'flavorsnap-api'),
+            'image_tag': get_config_value('deployment.image_tag', 'latest'),
+            'environment': Environment(get_config_value('deployment.environment', 'staging')),
+            'port': get_config_value('deployment.port', 5000),
+            'health_check_url': get_config_value('deployment.health_check_url', '/health'),
+            'health_check_interval': get_config_value('deployment.health_check_interval', 30),
+            'health_check_timeout': get_config_value('deployment.health_check_timeout', 10),
+            'health_check_retries': get_config_value('deployment.health_check_retries', 3),
+            'rollback_threshold': get_config_value('deployment.rollback_threshold', 0.5),
+            'zero_downtime': get_config_value('deployment.zero_downtime', True)
+        }
+        defaults.update(kwargs)
+        return DeploymentConfig(**defaults)
+
+    def build_image(self, config: DeploymentConfig) -> str:
+        """Build Docker image for deployment"""
+        self.logger.info(f"Building Docker image: {config.image_name}:{config.image_tag}")
         
-        # Setup directories
-        self.deployment_dir.mkdir(exist_ok=True)
-        self.backup_dir.mkdir(exist_ok=True)
+        dockerfile_path = Path(__file__).parent / "Dockerfile"
+        build_context = Path(__file__).parent.parent
         
-        # Setup logging
-        self._setup_logging()
+        try:
+            image, build_logs = self.docker_client.images.build(
+                path=str(build_context),
+                dockerfile=str(dockerfile_path),
+                tag=f"{config.image_name}:{config.image_tag}",
+                rm=True
+            )
+            
+            self.logger.info(f"Successfully built image: {image.id}")
+            return image.id
+            
+        except Exception as e:
+            self.logger.error(f"Failed to build Docker image: {e}")
+            raise
+
+    def run_health_checks(self, config: DeploymentConfig, container_id: str) -> bool:
+        """Run health checks on deployed container"""
+        self.logger.info(f"Running health checks for container {container_id}")
         
-        # Initialize deployment tracking
-        self._init_deployment_tracking()
-    
-    def _setup_logging(self):
-        """Setup logging for deployment events"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('deployment.log'),
-                logging.StreamHandler()
-            ]
+        try:
+            container = self.docker_client.containers.get(container_id)
+            container.reload()
+            
+            # Check if container is running
+            if container.status != 'running':
+                self.logger.error(f"Container {container_id} is not running: {container.status}")
+                return False
+            
+            # Get container IP
+            container_ip = container.attrs['NetworkSettings']['IPAddress']
+            if not container_ip:
+                # Use host port mapping
+                port_mapping = container.attrs['NetworkSettings']['Ports'].get(f'{config.port}/tcp', [])
+                if port_mapping:
+                    host_ip = port_mapping[0]['HostIp']
+                    host_port = port_mapping[0]['HostPort']
+                    health_url = f"http://{host_ip}:{host_port}{config.health_check_url}"
+                else:
+                    self.logger.error("No port mapping found for container")
+                    return False
+            else:
+                health_url = f"http://{container_ip}:{config.port}{config.health_check_url}"
+            
+            # Perform health check with retries
+            for attempt in range(config.health_check_retries):
+                try:
+                    response = requests.get(
+                        health_url,
+                        timeout=config.health_check_timeout
+                    )
+                    
+                    if response.status_code == 200:
+                        health_data = response.json()
+                        if health_data.get('status') == 'healthy':
+                            self.logger.info(f"Health check passed on attempt {attempt + 1}")
+                            return True
+                        else:
+                            self.logger.warning(f"Health check returned unhealthy status: {health_data}")
+                    
+                except requests.exceptions.RequestException as e:
+                    self.logger.warning(f"Health check attempt {attempt + 1} failed: {e}")
+                
+                if attempt < config.health_check_retries - 1:
+                    time.sleep(config.health_check_interval)
+            
+            self.logger.error(f"Health checks failed after {config.health_check_retries} attempts")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Health check error: {e}")
+            return False
+
+    def deploy_blue_green(self, config: DeploymentConfig) -> str:
+        """Deploy using blue-green strategy"""
+        deployment_id = f"deployment-{int(time.time())}"
+        
+        # Create deployment record
+        deployment = DeploymentRecord(
+            id=deployment_id,
+            config=config,
+            status=DeploymentStatus.PENDING,
+            created_at=datetime.now()
         )
-        self.logger = logging.getLogger('ModelDeployment')
-    
-    def _init_deployment_tracking(self):
-        """Initialize deployment tracking database"""
-        with sqlite3.connect(self.registry_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS deployment_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    model_version TEXT NOT NULL,
-                    previous_version TEXT,
-                    success BOOLEAN NOT NULL,
-                    message TEXT,
-                    metrics TEXT,
-                    FOREIGN KEY (model_version) REFERENCES models(version),
-                    FOREIGN KEY (previous_version) REFERENCES models(version)
-                )
-            """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS deployment_health (
-                    model_version TEXT PRIMARY KEY,
-                    last_health_check TEXT,
-                    health_score REAL,
-                    error_count INTEGER DEFAULT 0,
-                    total_requests INTEGER DEFAULT 0,
-                    avg_response_time REAL,
-                    last_error TEXT,
-                    FOREIGN KEY (model_version) REFERENCES models(version)
-                )
-            """)
-    
-    def _record_deployment_event(self, event: DeploymentEvent):
-        """Record a deployment event"""
-        with sqlite3.connect(self.registry_path) as conn:
-            conn.execute("""
-                INSERT INTO deployment_events 
-                (timestamp, event_type, model_version, previous_version, 
-                 success, message, metrics)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                event.timestamp,
-                event.event_type,
-                event.model_version,
-                event.previous_version,
-                event.success,
-                event.message,
-                json.dumps(event.metrics) if event.metrics else None
-            ))
-    
-    def _backup_current_model(self, current_version: str) -> bool:
-        """Create backup of current model"""
-        if not self.config.backup_models:
-            return True
+        self.deployments[deployment_id] = deployment
         
         try:
-            current_model = self.model_registry.get_model(current_version)
-            if not current_model:
-                return False
+            deployment.status = DeploymentStatus.BUILDING
+            image_id = self.build_image(config)
             
-            # Create backup directory
-            backup_path = self.backup_dir / f"{current_version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            backup_path.mkdir(exist_ok=True)
+            deployment.status = DeploymentStatus.DEPLOYING
+            deployment.started_at = datetime.now()
             
-            # Copy model file
-            shutil.copy2(current_model.model_path, backup_path / "model.pth")
+            # Determine which environment to deploy to
+            if self.green_deployment is None:
+                target_color = 'green'
+            elif self.blue_deployment is None:
+                target_color = 'blue'
+            else:
+                # Both exist, deploy to the inactive one
+                blue_record = self.deployments.get(self.blue_deployment)
+                if blue_record and blue_record.status == DeploymentStatus.ACTIVE:
+                    target_color = 'green'
+                else:
+                    target_color = 'blue'
             
-            # Save metadata
-            metadata_path = backup_path / "metadata.json"
-            with open(metadata_path, 'w') as f:
-                json.dump({
-                    'version': current_model.version,
-                    'created_at': current_model.created_at,
-                    'created_by': current_model.created_by,
-                    'description': current_model.description,
-                    'accuracy': current_model.accuracy,
-                    'loss': current_model.loss,
-                    'backup_timestamp': datetime.now().isoformat()
-                }, f, indent=2)
+            # Deploy to target environment
+            container_name = f"flavorsnap-{target_color}"
             
-            self.logger.info(f"Model backup created: {backup_path}")
-            
-            # Cleanup old backups
-            self._cleanup_old_backups()
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to backup model: {e}")
-            return False
-    
-    def _cleanup_old_backups(self):
-        """Remove old backups keeping only the most recent ones"""
-        if not self.backup_dir.exists():
-            return
-        
-        # Group backups by version
-        version_backups = {}
-        for backup_path in self.backup_dir.iterdir():
-            if backup_path.is_dir():
-                version = backup_path.name.split('_')[0]
-                if version not in version_backups:
-                    version_backups[version] = []
-                version_backups[version].append(backup_path)
-        
-        # Keep only the most recent backups for each version
-        for version, backups in version_backups.items():
-            if len(backups) > self.config.max_backup_count:
-                # Sort by timestamp and remove oldest
-                backups.sort(key=lambda x: x.name, reverse=True)
-                for old_backup in backups[self.config.max_backup_count:]:
-                    try:
-                        shutil.rmtree(old_backup)
-                        self.logger.info(f"Removed old backup: {old_backup}")
-                    except Exception as e:
-                        self.logger.error(f"Failed to remove backup {old_backup}: {e}")
-    
-    def _validate_model(self, version: str) -> Tuple[bool, str]:
-        """Validate model before deployment"""
-        try:
-            model_metadata = self.model_registry.get_model(version)
-            if not model_metadata:
-                return False, "Model not found in registry"
-            
-            # Check if model file exists
-            if not os.path.exists(model_metadata.model_path):
-                return False, "Model file not found"
-            
-            # Try to load model
+            # Stop and remove existing container if it exists
             try:
-                # Simple validation - try to load the model
-                model_data = torch.load(model_metadata.model_path, map_location='cpu')
-                self.logger.info(f"Model {version} validation passed")
-                return True, "Model validation successful"
-                
+                existing_container = self.docker_client.containers.get(container_name)
+                existing_container.stop()
+                existing_container.remove()
+                self.logger.info(f"Removed existing {target_color} container")
+            except docker.errors.NotFound:
+                pass
             except Exception as e:
-                return False, f"Model loading failed: {str(e)}"
+                self.logger.warning(f"Error removing existing container: {e}")
+            
+            # Start new container
+            environment_vars = [
+                f"FLASK_ENV={config.environment.value}",
+                f"DEPLOYMENT_COLOR={target_color}",
+                f"DEPLOYMENT_ID={deployment_id}"
+            ]
+            
+            container = self.docker_client.containers.run(
+                f"{config.image_name}:{config.image_tag}",
+                name=container_name,
+                ports={f'{config.port}/tcp': None},  # Auto-assign host port
+                environment=environment_vars,
+                detach=True,
+                restart_policy={"Name": "unless-stopped"}
+            )
+            
+            deployment.container_id = container.id
+            self.logger.info(f"Started {target_color} container: {container.id}")
+            
+            # Update deployment tracking
+            if target_color == 'green':
+                self.green_deployment = deployment_id
+            else:
+                self.blue_deployment = deployment_id
+            
+            # Run health checks
+            deployment.status = DeploymentStatus.HEALTH_CHECKING
+            if self.run_health_checks(config, container.id):
+                deployment.status = DeploymentStatus.ACTIVE
+                deployment.completed_at = datetime.now()
+                
+                # Switch traffic if zero downtime is enabled
+                if config.zero_downtime:
+                    self.switch_traffic(target_color)
+                
+                self.active_deployment = deployment_id
+                self.logger.info(f"Successfully deployed {target_color} environment")
+                
+                # Start monitoring
+                self.start_deployment_monitoring(deployment_id)
+                
+                return deployment_id
+            else:
+                deployment.status = DeploymentStatus.FAILED
+                deployment.error_message = "Health checks failed"
+                deployment.completed_at = datetime.now()
+                
+                # Auto-rollback if enabled
+                if self.active_deployment:
+                    self.logger.info("Auto-rolling back due to health check failure")
+                    self.rollback_deployment(deployment_id, "Health check failure")
+                
+                raise Exception("Deployment failed health checks")
                 
         except Exception as e:
-            return False, f"Validation error: {str(e)}"
-    
-    def deploy_model(self, target_version: str, force: bool = False) -> bool:
-        """Deploy a new model version with rollback capability"""
+            deployment.status = DeploymentStatus.FAILED
+            deployment.error_message = str(e)
+            deployment.completed_at = datetime.now()
+            self.logger.error(f"Deployment {deployment_id} failed: {e}")
+            raise
+
+    def switch_traffic(self, target_color: str):
+        """Switch traffic between blue and green environments"""
+        self.logger.info(f"Switching traffic to {target_color} environment")
         
-        # Validate target model
-        is_valid, validation_msg = self._validate_model(target_version)
-        if not is_valid:
-            self.logger.error(f"Model validation failed: {validation_msg}")
-            return False
+        try:
+            # Update load balancer configuration
+            # This would integrate with your load balancer (nginx, AWS ALB, etc.)
+            # For now, we'll simulate the switch
+            
+            if target_color == 'green':
+                if self.blue_deployment:
+                    blue_record = self.deployments.get(self.blue_deployment)
+                    if blue_record and blue_record.container_id:
+                        try:
+                            blue_container = self.docker_client.containers.get(blue_record.container_id)
+                            blue_container.stop()
+                            self.logger.info("Stopped blue environment")
+                        except Exception as e:
+                            self.logger.warning(f"Error stopping blue container: {e}")
+            else:
+                if self.green_deployment:
+                    green_record = self.deployments.get(self.green_deployment)
+                    if green_record and green_record.container_id:
+                        try:
+                            green_container = self.docker_client.containers.get(green_record.container_id)
+                            green_container.stop()
+                            self.logger.info("Stopped green environment")
+                        except Exception as e:
+                            self.logger.warning(f"Error stopping green container: {e}")
+            
+            self.logger.info(f"Traffic switched to {target_color} environment")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to switch traffic: {e}")
+            raise
+
+    def rollback_deployment(self, deployment_id: str, reason: str = "Manual rollback"):
+        """Rollback a deployment to the previous stable version"""
+        self.logger.info(f"Rolling back deployment {deployment_id}: {reason}")
         
-        # Get current active model
-        current_model = self.model_registry.get_active_model()
-        current_version = current_model.version if current_model else None
+        deployment = self.deployments.get(deployment_id)
+        if not deployment:
+            raise Exception(f"Deployment {deployment_id} not found")
         
-        # Don't deploy if already active
-        if current_version == target_version:
-            self.logger.info(f"Model {target_version} is already active")
+        try:
+            # Find the previous stable deployment
+            previous_deployment = None
+            for dep_id, dep_record in self.deployments.items():
+                if (dep_record.status == DeploymentStatus.ACTIVE and 
+                    dep_id != deployment_id and
+                    dep_record.created_at < deployment.created_at):
+                    previous_deployment = dep_record
+                    break
+            
+            if not previous_deployment:
+                self.logger.warning("No previous stable deployment found for rollback")
+                return False
+            
+            # Switch traffic back to previous deployment
+            if self.blue_deployment == deployment_id:
+                self.switch_traffic('blue' if self.green_deployment == previous_deployment.id else 'green')
+            elif self.green_deployment == deployment_id:
+                self.switch_traffic('green' if self.blue_deployment == previous_deployment.id else 'blue')
+            
+            # Update deployment status
+            deployment.status = DeploymentStatus.ROLLED_BACK
+            deployment.rollback_reason = reason
+            deployment.completed_at = datetime.now()
+            
+            # Stop failed deployment container
+            if deployment.container_id:
+                try:
+                    container = self.docker_client.containers.get(deployment.container_id)
+                    container.stop()
+                    self.logger.info(f"Stopped failed deployment container: {deployment.container_id}")
+                except Exception as e:
+                    self.logger.warning(f"Error stopping failed container: {e}")
+            
+            # Update active deployment
+            self.active_deployment = previous_deployment.id
+            
+            self.logger.info(f"Successfully rolled back to deployment {previous_deployment.id}")
             return True
-        
-        # Backup current model
-        if current_version and not self._backup_current_model(current_version):
-            self.logger.warning("Failed to backup current model")
-            if not force:
-                return False
-        
-        # Perform deployment
-        try:
-            # Activate new model
-            success = self.model_registry.activate_model(target_version)
             
-            if success:
-                # Record deployment event
-                event = DeploymentEvent(
-                    timestamp=datetime.now().isoformat(),
-                    event_type="deploy",
-                    model_version=target_version,
-                    previous_version=current_version,
-                    success=True,
-                    message=f"Successfully deployed model {target_version}"
-                )
-                self._record_deployment_event(event)
-                
-                self.logger.info(f"Successfully deployed model {target_version}")
-                return True
-            else:
-                # Rollback if deployment failed
-                if current_version:
-                    self.rollback_model(current_version, reason="Deployment activation failed")
-                
-                event = DeploymentEvent(
-                    timestamp=datetime.now().isoformat(),
-                    event_type="deploy",
-                    model_version=target_version,
-                    previous_version=current_version,
-                    success=False,
-                    message="Failed to activate model"
-                )
-                self._record_deployment_event(event)
-                
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Deployment failed: {e}")
-            
-            # Attempt rollback
-            if current_version:
-                self.rollback_model(current_version, reason=f"Deployment error: {str(e)}")
-            
-            return False
-    
-    def rollback_model(self, target_version: str, reason: str = "") -> bool:
-        """Rollback to a previous model version"""
-        
-        try:
-            # Validate target model
-            is_valid, validation_msg = self._validate_model(target_version)
-            if not is_valid:
-                self.logger.error(f"Rollback validation failed: {validation_msg}")
-                return False
-            
-            # Get current model
-            current_model = self.model_registry.get_active_model()
-            current_version = current_model.version if current_model else None
-            
-            # Perform rollback
-            success = self.model_registry.activate_model(target_version)
-            
-            if success:
-                # Record rollback event
-                event = DeploymentEvent(
-                    timestamp=datetime.now().isoformat(),
-                    event_type="rollback",
-                    model_version=target_version,
-                    previous_version=current_version,
-                    success=True,
-                    message=f"Rolled back to model {target_version}. Reason: {reason}"
-                )
-                self._record_deployment_event(event)
-                
-                self.logger.info(f"Successfully rolled back to model {target_version}")
-                return True
-            else:
-                self.logger.error("Failed to perform rollback")
-                return False
-                
         except Exception as e:
             self.logger.error(f"Rollback failed: {e}")
             return False
-    
-    def get_deployment_history(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get deployment history"""
-        with sqlite3.connect(self.registry_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
-                SELECT * FROM deployment_events 
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            """, (limit,))
-            
-            history = []
-            for row in cursor.fetchall():
-                history.append({
-                    'timestamp': row['timestamp'],
-                    'event_type': row['event_type'],
-                    'model_version': row['model_version'],
-                    'previous_version': row['previous_version'],
-                    'success': bool(row['success']),
-                    'message': row['message'],
-                    'metrics': json.loads(row['metrics']) if row['metrics'] else None
-                })
-            
-            return history
-    
-    def get_available_rollback_versions(self) -> List[str]:
-        """Get list of versions available for rollback"""
-        models = self.model_registry.list_models()
-        current_model = self.model_registry.get_active_model()
-        current_version = current_model.version if current_model else None
+
+    def start_deployment_monitoring(self, deployment_id: str):
+        """Start monitoring a deployment for health and performance"""
+        if self.monitoring_active:
+            return
         
-        # Return all models except the current one
-        available_versions = [m.version for m in models if m.version != current_version]
+        self.monitoring_active = True
+        self.logger.info(f"Starting monitoring for deployment {deployment_id}")
         
-        # Also check backup directory
-        backup_versions = []
-        if self.backup_dir.exists():
-            for backup_path in self.backup_dir.iterdir():
-                if backup_path.is_dir():
-                    version = backup_path.name.split('_')[0]
-                    if version not in backup_versions and version not in available_versions:
-                        backup_versions.append(version)
+        # Start monitoring thread (simplified for this implementation)
+        # In production, you'd use a proper monitoring system like Prometheus
         
-        return available_versions + backup_versions
-    
-    def health_check(self, model_version: str = None) -> Dict[str, Any]:
-        """Perform health check on deployed model"""
+    def get_deployment_status(self, deployment_id: str) -> Optional[DeploymentRecord]:
+        """Get the status of a deployment"""
+        return self.deployments.get(deployment_id)
+
+    def list_deployments(self) -> List[DeploymentRecord]:
+        """List all deployments"""
+        return list(self.deployments.values())
+
+    def get_active_deployment(self) -> Optional[DeploymentRecord]:
+        """Get the currently active deployment"""
+        if self.active_deployment:
+            return self.deployments.get(self.active_deployment)
+        return None
+
+    def cleanup_old_deployments(self, keep_count: int = 5):
+        """Clean up old deployment records and containers"""
+        self.logger.info(f"Cleaning up old deployments, keeping last {keep_count}")
         
-        if not model_version:
-            current_model = self.model_registry.get_active_model()
-            model_version = current_model.version if current_model else None
+        # Sort deployments by creation time
+        sorted_deployments = sorted(
+            self.deployments.values(),
+            key=lambda d: d.created_at,
+            reverse=True
+        )
         
-        if not model_version:
-            return {"healthy": False, "message": "No active model found"}
+        # Keep the most recent deployments
+        deployments_to_keep = sorted_deployments[:keep_count]
+        deployments_to_remove = sorted_deployments[keep_count:]
         
-        try:
-            # Validate model file exists and is loadable
-            model_metadata = self.model_registry.get_model(model_version)
-            if not model_metadata:
-                return {"healthy": False, "message": "Model not found in registry"}
-            
-            # Try to load model
-            model_data = torch.load(model_metadata.model_path, map_location='cpu')
-            
-            # Get current health metrics
-            with sqlite3.connect(self.registry_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
-                    SELECT * FROM deployment_health 
-                    WHERE model_version = ?
-                """, (model_version,))
-                
-                health_row = cursor.fetchone()
-            
-            health_score = 1.0  # Default healthy score
-            error_count = 0
-            total_requests = 0
-            avg_response_time = 0.0
-            last_error = None
-            
-            if health_row:
-                health_score = health_row['health_score'] or 1.0
-                error_count = health_row['error_count'] or 0
-                total_requests = health_row['total_requests'] or 0
-                avg_response_time = health_row['avg_response_time'] or 0.0
-                last_error = health_row['last_error']
-            
-            # Determine health status
-            healthy = health_score >= 0.8 and error_count < 10
-            
-            # Record health check
-            event = DeploymentEvent(
-                timestamp=datetime.now().isoformat(),
-                event_type="health_check",
-                model_version=model_version,
-                success=healthy,
-                message=f"Health check completed. Score: {health_score:.2f}",
-                metrics={
-                    "health_score": health_score,
-                    "error_count": error_count,
-                    "total_requests": total_requests,
-                    "avg_response_time": avg_response_time
-                }
-            )
-            self._record_deployment_event(event)
-            
-            return {
-                "healthy": healthy,
-                "model_version": model_version,
-                "health_score": health_score,
-                "error_count": error_count,
-                "total_requests": total_requests,
-                "avg_response_time": avg_response_time,
-                "last_error": last_error,
-                "message": "Model is healthy" if healthy else "Model health issues detected"
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Health check failed: {e}")
-            return {
-                "healthy": False,
-                "model_version": model_version,
-                "message": f"Health check failed: {str(e)}"
-            }
-    
-    def update_health_metrics(self, 
-                             model_version: str,
-                             response_time: float,
-                             success: bool,
-                             error_message: str = None):
-        """Update health metrics for a model"""
-        
-        with sqlite3.connect(self.registry_path) as conn:
-            # Get current metrics
-            cursor = conn.execute("""
-                SELECT error_count, total_requests, avg_response_time
-                FROM deployment_health
-                WHERE model_version = ?
-            """, (model_version,))
-            
-            row = cursor.fetchone()
-            
-            if row:
-                error_count, total_requests, avg_response_time = row
-                error_count = error_count or 0
-                total_requests = total_requests or 0
-                avg_response_time = avg_response_time or 0.0
-            else:
-                error_count = 0
-                total_requests = 0
-                avg_response_time = 0.0
-            
-            # Update metrics
-            total_requests += 1
-            if not success:
-                error_count += 1
-            
-            # Calculate new average response time
-            if total_requests == 1:
-                avg_response_time = response_time
-            else:
-                avg_response_time = (avg_response_time * (total_requests - 1) + response_time) / total_requests
-            
-            # Calculate health score
-            error_rate = error_count / total_requests if total_requests > 0 else 0
-            health_score = max(0.0, 1.0 - error_rate - (response_time / 10.0))  # Penalize slow responses
-            
-            # Update database
-            conn.execute("""
-                INSERT OR REPLACE INTO deployment_health
-                (model_version, last_health_check, health_score, error_count, 
-                 total_requests, avg_response_time, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                model_version,
-                datetime.now().isoformat(),
-                health_score,
-                error_count,
-                total_requests,
-                avg_response_time,
-                error_message
-            ))
-        
-        # Check if auto-rollback is needed
-        if (self.config.auto_rollback and 
-            health_score < (1.0 - self.config.rollback_threshold) and
-            total_requests >= self.config.monitoring_window):
-            
-            self.logger.warning(f"Model {model_version} health degraded ({health_score:.2f}), considering rollback")
-            
-            # Get previous stable version
-            stable_models = [m for m in self.model_registry.list_models() if m.is_stable]
-            if stable_models:
-                previous_stable = stable_models[0].version
-                if previous_stable != model_version:
-                    self.rollback_model(previous_stable, f"Auto-rollback due to health degradation: {health_score:.2f}")
-                    return True
-        
-        return False
-    
-    def multi_environment_deploy(self, 
-                                target_version: str, 
-                                environments: List[str] = ["staging", "production"],
-                                strategy: str = "rolling") -> Dict[str, Any]:
-        """Deploy to multiple environments with different strategies"""
-        
-        results = {}
-        
-        for env in environments:
+        for deployment in deployments_to_remove:
             try:
-                self.logger.info(f"Starting deployment to {env} environment")
+                # Remove container if it exists
+                if deployment.container_id:
+                    try:
+                        container = self.docker_client.containers.get(deployment.container_id)
+                        container.remove(force=True)
+                        self.logger.info(f"Removed container for deployment {deployment.id}")
+                    except docker.errors.NotFound:
+                        pass
                 
-                # Environment-specific validation
-                if env == "production":
-                    # Additional checks for production
-                    if not self._production_readiness_check(target_version):
-                        results[env] = {"success": False, "message": "Production readiness check failed"}
-                        continue
+                # Remove from tracking
+                del self.deployments[deployment.id]
                 
-                # Perform deployment based on strategy
-                if strategy == "rolling":
-                    success = self._rolling_deploy(target_version, env)
-                elif strategy == "blue_green":
-                    success = self._blue_green_deploy(target_version, env)
-                else:
-                    success = self.deploy_model(target_version)
+                # Update blue/green tracking
+                if self.blue_deployment == deployment.id:
+                    self.blue_deployment = None
+                elif self.green_deployment == deployment.id:
+                    self.green_deployment = None
                 
-                results[env] = {
-                    "success": success,
-                    "message": f"Deployment to {env} {'succeeded' if success else 'failed'}"
-                }
+                self.logger.info(f"Cleaned up deployment {deployment.id}")
                 
-                # If production deployment fails, stop further deployments
-                if env == "production" and not success:
-                    self.logger.error("Production deployment failed, stopping further deployments")
-                    break
-                    
             except Exception as e:
-                results[env] = {"success": False, "message": f"Deployment error: {str(e)}"}
-                self.logger.error(f"Deployment to {env} failed: {e}")
-        
-        return results
-    
-    def _production_readiness_check(self, version: str) -> bool:
-        """Check if model is ready for production deployment"""
-        try:
-            model_metadata = self.model_registry.get_model(version)
-            if not model_metadata:
-                return False
-            
-            # Check accuracy threshold
-            if model_metadata.accuracy < 0.85:
-                self.logger.warning(f"Model accuracy {model_metadata.accuracy} below production threshold")
-                return False
-            
-            # Check if model has been tested in staging
-            staging_health = self.health_check(version)
-            if not staging_health.get("healthy", False):
-                self.logger.warning("Model not healthy in staging environment")
-                return False
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Production readiness check failed: {e}")
-            return False
-    
-    def _rolling_deploy(self, version: str, environment: str) -> bool:
-        """Perform rolling deployment"""
-        try:
-            # Simulate rolling update - in real implementation would update instances gradually
-            self.logger.info(f"Performing rolling deployment to {environment}")
-            
-            # Deploy to subset of instances first
-            success = self.deploy_model(version)
-            if success:
-                # Monitor for a short period
-                import time
-                time.sleep(30)
-                
-                # Check health after initial deployment
-                health = self.health_check(version)
-                if health.get("healthy", False):
-                    self.logger.info(f"Rolling deployment to {environment} successful")
-                    return True
-                else:
-                    self.logger.warning(f"Health check failed during rolling deployment to {environment}")
-                    return False
-            
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Rolling deployment failed: {e}")
-            return False
-    
-    def _blue_green_deploy(self, version: str, environment: str) -> bool:
-        """Perform blue-green deployment"""
-        try:
-            self.logger.info(f"Performing blue-green deployment to {environment}")
-            
-            # Deploy to green environment
-            green_success = self.deploy_model(version)
-            
-            if green_success:
-                # Run comprehensive tests on green
-                green_health = self.health_check(version)
-                
-                if green_health.get("healthy", False):
-                    # Switch traffic to green
-                    self.logger.info(f"Switching traffic to green environment for {environment}")
-                    return True
-                else:
-                    # Rollback green, keep blue
-                    current_model = self.model_registry.get_active_model()
-                    if current_model:
-                        self.rollback_model(current_model.version, "Blue-green deployment failed")
-                    return False
-            
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Blue-green deployment failed: {e}")
-            return False
-    
+                self.logger.error(f"Error cleaning up deployment {deployment.id}: {e}")
+
     def get_deployment_metrics(self) -> Dict[str, Any]:
-        """Get comprehensive deployment metrics"""
-        try:
-            with sqlite3.connect(self.registry_path) as conn:
-                conn.row_factory = sqlite3.Row
-                
-                # Get deployment statistics
-                cursor = conn.execute("""
-                    SELECT 
-                        event_type,
-                        COUNT(*) as count,
-                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count
-                    FROM deployment_events
-                    WHERE timestamp > datetime('now', '-30 days')
-                    GROUP BY event_type
-                """)
-                
-                event_stats = {}
-                for row in cursor.fetchall():
-                    event_stats[row['event_type']] = {
-                        'total': row['count'],
-                        'successful': row['success_count'],
-                        'success_rate': (row['success_count'] / row['count']) * 100 if row['count'] > 0 else 0
-                    }
-                
-                # Get health metrics
-                cursor = conn.execute("""
-                    SELECT 
-                        AVG(health_score) as avg_health,
-                        AVG(avg_response_time) as avg_response_time,
-                        SUM(error_count) as total_errors,
-                        SUM(total_requests) as total_requests
-                    FROM deployment_health
-                """)
-                
-                health_row = cursor.fetchone()
-                health_metrics = {
-                    'avg_health_score': health_row['avg_health'] or 0,
-                    'avg_response_time': health_row['avg_response_time'] or 0,
-                    'total_errors': health_row['total_errors'] or 0,
-                    'total_requests': health_row['total_requests'] or 0,
-                    'error_rate': (health_row['total_errors'] / health_row['total_requests']) * 100 if health_row['total_requests'] > 0 else 0
-                }
-                
-                # Get current model info
-                current_model = self.model_registry.get_active_model()
-                current_info = {
-                    'version': current_model.version if current_model else None,
-                    'accuracy': current_model.accuracy if current_model else 0,
-                    'deployment_date': current_model.created_at if current_model else None
-                }
-                
-                return {
-                    'deployment_stats': event_stats,
-                    'health_metrics': health_metrics,
-                    'current_model': current_info,
-                    'backup_count': len(list(self.backup_dir.iterdir())) if self.backup_dir.exists() else 0
-                }
-                
-        except Exception as e:
-            self.logger.error(f"Failed to get deployment metrics: {e}")
-            return {}
+        """Get deployment metrics and statistics"""
+        total_deployments = len(self.deployments)
+        active_deployments = len([d for d in self.deployments.values() if d.status == DeploymentStatus.ACTIVE])
+        failed_deployments = len([d for d in self.deployments.values() if d.status == DeploymentStatus.FAILED])
+        
+        return {
+            'total_deployments': total_deployments,
+            'active_deployments': active_deployments,
+            'failed_deployments': failed_deployments,
+            'success_rate': (total_deployments - failed_deployments) / total_deployments if total_deployments > 0 else 0,
+            'current_active': self.active_deployment,
+            'blue_deployment': self.blue_deployment,
+            'green_deployment': self.green_deployment,
+            'monitoring_active': self.monitoring_active
+        }
+
+# CLI interface for deployment management
+def main():
+    import argparse
     
-    def schedule_deployment(self, 
-                          target_version: str, 
-                          scheduled_time: datetime,
-                          environments: List[str] = None) -> str:
-        """Schedule a deployment for a specific time"""
-        try:
-            deployment_id = f"scheduled_{target_version}_{int(scheduled_time.timestamp())}"
-            
-            # In a real implementation, this would use a task queue like Celery
-            # For now, just record the scheduled deployment
-            with sqlite3.connect(self.registry_path) as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS scheduled_deployments (
-                        id TEXT PRIMARY KEY,
-                        target_version TEXT NOT NULL,
-                        scheduled_time TEXT NOT NULL,
-                        environments TEXT,
-                        status TEXT DEFAULT 'pending',
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                conn.execute("""
-                    INSERT INTO scheduled_deployments 
-                    (id, target_version, scheduled_time, environments)
-                    VALUES (?, ?, ?, ?)
-                """, (
-                    deployment_id,
-                    target_version,
-                    scheduled_time.isoformat(),
-                    json.dumps(environments or ["production"])
-                ))
-            
-            self.logger.info(f"Scheduled deployment {deployment_id} for {scheduled_time}")
-            return deployment_id
-            
-        except Exception as e:
-            self.logger.error(f"Failed to schedule deployment: {e}")
-            return ""
+    parser = argparse.ArgumentParser(description='FlavorSnap Deployment Manager')
+    parser.add_argument('action', choices=['deploy', 'rollback', 'status', 'list', 'cleanup'])
+    parser.add_argument('--environment', default='staging', help='Deployment environment')
+    parser.add_argument('--tag', default='latest', help='Docker image tag')
+    parser.add_argument('--deployment-id', help='Deployment ID for rollback')
+    parser.add_argument('--reason', default='Manual rollback', help='Rollback reason')
     
-    def get_scheduled_deployments(self) -> List[Dict[str, Any]]:
-        """Get list of scheduled deployments"""
-        try:
-            with sqlite3.connect(self.registry_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
-                    SELECT * FROM scheduled_deployments 
-                    WHERE status = 'pending'
-                    ORDER BY scheduled_time
-                """)
-                
-                deployments = []
-                for row in cursor.fetchall():
-                    deployments.append({
-                        'id': row['id'],
-                        'target_version': row['target_version'],
-                        'scheduled_time': row['scheduled_time'],
-                        'environments': json.loads(row['environments']),
-                        'status': row['status'],
-                        'created_at': row['created_at']
-                    })
-                
-                return deployments
-                
-        except Exception as e:
-            self.logger.error(f"Failed to get scheduled deployments: {e}")
-            return []
+    args = parser.parse_args()
+    
+    try:
+        manager = DeploymentManager()
+        
+        if args.action == 'deploy':
+            config = manager.create_deployment_config(
+                environment=Environment(args.environment),
+                image_tag=args.tag
+            )
+            deployment_id = manager.deploy_blue_green(config)
+            print(f"Deployment started: {deployment_id}")
+            
+        elif args.action == 'rollback':
+            if not args.deployment_id:
+                # Get latest deployment to rollback
+                active = manager.get_active_deployment()
+                if active:
+                    args.deployment_id = active.id
+                else:
+                    print("No active deployment found for rollback")
+                    return
+            
+            success = manager.rollback_deployment(args.deployment_id, args.reason)
+            if success:
+                print(f"Successfully rolled back deployment {args.deployment_id}")
+            else:
+                print(f"Rollback failed for deployment {args.deployment_id}")
+        
+        elif args.action == 'status':
+            if args.deployment_id:
+                deployment = manager.get_deployment_status(args.deployment_id)
+                if deployment:
+                    print(json.dumps(asdict(deployment), indent=2, default=str))
+                else:
+                    print(f"Deployment {args.deployment_id} not found")
+            else:
+                active = manager.get_active_deployment()
+                if active:
+                    print(json.dumps(asdict(active), indent=2, default=str))
+                else:
+                    print("No active deployment")
+        
+        elif args.action == 'list':
+            deployments = manager.list_deployments()
+            for deployment in deployments:
+                print(f"{deployment.id}: {deployment.status.value} ({deployment.created_at})")
+        
+        elif args.action == 'cleanup':
+            manager.cleanup_old_deployments()
+            print("Cleanup completed")
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

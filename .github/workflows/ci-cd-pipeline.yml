@@ -1,0 +1,617 @@
+name: Advanced CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop, feature/* ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      run_security_scan:
+        description: 'Run security scanning'
+        required: false
+        default: 'true'
+        type: boolean
+      run_performance_tests:
+        description: 'Run performance tests'
+        required: false
+        default: 'true'
+        type: boolean
+      deploy_to_staging:
+        description: 'Deploy to staging environment'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.9'
+  GO_VERSION: '1.21'
+
+jobs:
+  # Code Quality and Static Analysis
+  code-quality:
+    runs-on: ubuntu-latest
+    outputs:
+      quality-score: ${{ steps.quality.outputs.score }}
+      coverage: ${{ steps.coverage.outputs.percentage }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    
+    - name: Install Node.js dependencies
+      run: |
+        cd frontend && npm ci
+    
+    - name: Run Python linting
+      run: |
+        pip install flake8 black isort mypy
+        flake8 ml-model-api/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        black --check ml-model-api/
+        isort --check-only ml-model-api/
+        mypy ml-model-api/ --ignore-missing-imports
+    
+    - name: Run JavaScript linting
+      run: |
+        cd frontend && npm run lint
+    
+    - name: Run security scanning
+      id: security
+      run: |
+        pip install safety bandit semgrep trufflehog gitleaks
+        echo "Running security scans..."
+        
+        # Dependency scanning
+        safety check --json --output dependency-security-reports/python-dependencies.json || true
+        
+        # Code security analysis
+        bandit -r ml-model-api/ -f json -o code-security-reports/bandit-report.json || true
+        semgrep --config=auto --json --output=code-security-reports/semgrep-report.json ml-model-api/ || true
+        
+        # Secret scanning
+        trufflehog filesystem . --json --output=secrets-security-reports/trufflehog-report.json || true
+        gitleaks detect --json --output=secrets-security-reports/gitleaks-report.json || true
+        
+        # Generate summary
+        python scripts/security/generate_summary.py
+    
+    - name: Run unit tests with coverage
+      id: coverage
+      run: |
+        pip install pytest pytest-cov pytest-mock coverage
+        pytest tests/unit/ --cov=ml_model_api --cov-report=json --cov-report=html --cov-report=xml --junitxml=reports/unit-tests.xml
+        COVERAGE=$(python -c "import json; print(json.load(open('coverage.json')['totals']['percent_covered']))")
+        echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
+    
+    - name: Quality gate evaluation
+      id: quality
+      run: |
+        python -c "
+        import json
+        coverage = ${{ steps.coverage.outputs.percentage }}
+        quality_score = min(100, coverage + 10)  # Simple quality score calculation
+        print(f'score={quality_score}')
+        print(f'score={quality_score}') >> $GITHUB_OUTPUT
+        "
+    
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-reports
+        path: |
+          coverage.xml
+          htmlcov/
+          coverage.json
+        retention-days: 30
+    
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          dependency-security-reports/
+          code-security-reports/
+          secrets-security-reports/
+        retention-days: 30
+
+  # Integration Tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: flavorsnap_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+    
+    - name: Wait for services
+      run: |
+        timeout 60 bash -c 'until nc -z localhost 5432; do sleep 1; done'
+        timeout 60 bash -c 'until nc -z localhost 6379; do sleep 1; done'
+    
+    - name: Run database migrations
+      run: |
+        python manage.py migrate
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/flavorsnap_test
+        REDIS_URL: redis://localhost:6379
+    
+    - name: Run integration tests
+      run: |
+        pytest tests/integration/ --junitxml=reports/integration-tests.xml -v
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/flavorsnap_test
+        REDIS_URL: redis://localhost:6379
+    
+    - name: Upload integration test reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: integration-test-reports
+        path: reports/integration-tests.xml
+        retention-days: 30
+
+  # Performance Tests
+  performance-tests:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    if: github.event.inputs.run_performance_tests == 'true' || github.event_name == 'schedule'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install locust pytest-benchmark
+    
+    - name: Start application
+      run: |
+        python manage.py runserver &
+        sleep 10
+    
+    - name: Run performance benchmarks
+      run: |
+        pytest tests/performance/ --benchmark-json=performance-results.json --benchmark-only
+    
+    - name: Run load tests
+      run: |
+        locust --headless --users 100 --spawn-rate 10 --run-time 60s --host http://localhost:8000 tests/performance/locustfile.py
+    
+    - name: Upload performance reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-reports
+        path: |
+          performance-results.json
+          locust_report.html
+        retention-days: 30
+
+  # API Tests
+  api-tests:
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest-httpx
+    
+    - name: Start application
+      run: |
+        python manage.py runserver &
+        sleep 10
+    
+    - name: Run API tests
+      run: |
+        pytest tests/api/ --junitxml=reports/api-tests.xml -v
+    
+    - name: Upload API test reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: api-test-reports
+        path: reports/api-tests.xml
+        retention-days: 30
+
+  # Security Scanning (Enhanced)
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    if: github.event.inputs.run_security_scan == 'true' || github.event_name == 'schedule'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run comprehensive security scan
+      run: |
+        python scripts/security/vulnerability_scanner.py
+    
+    - name: Generate remediation scripts
+      run: |
+        python scripts/security/generate_remediation.py
+    
+    - name: Check for critical vulnerabilities
+      run: |
+        python scripts/security/check_critical_vulns.py --fail-threshold high
+    
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: enhanced-security-reports
+        path: |
+          security-reports/
+          remediation-scripts/
+        retention-days: 30
+
+  # Container Security
+  container-security:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        tags: flavorsnap:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Run Docker security scan
+      run: |
+        # Install security tools
+        sudo apt-get update
+        sudo apt-get install -y docker.io trivy hadolint
+        
+        # Dockerfile linting
+        hadolint Dockerfile > container-security-reports/hadolint-report.json || true
+        
+        # Container image scanning
+        trivy image --format json --output container-security-reports/trivy-report.json flavorsnap:test || true
+        
+        # Generate summary
+        python scripts/security/check_headers.py --output container-security-reports/headers-report.json
+    
+    - name: Upload container security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: container-security-reports
+        path: container-security-reports/
+        retention-days: 30
+
+  # Quality Gates
+  quality-gates:
+    runs-on: ubuntu-latest
+    needs: [code-quality, integration-tests, api-tests]
+    outputs:
+      gates-passed: ${{ steps.gates.outputs.passed }}
+      overall-score: ${{ steps.gates.outputs.score }}
+    
+    steps:
+    - name: Download all test reports
+      uses: actions/download-artifact@v3
+      with:
+        path: all-reports/
+    
+    - name: Evaluate quality gates
+      id: gates
+      run: |
+        python ml-model-api/quality_gates.py
+    
+    - name: Generate comprehensive report
+      run: |
+        python ml-model-api/reporting.py
+    
+    - name: Upload quality reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: quality-reports
+        path: reports/
+        retention-days: 30
+
+  # Build and Package
+  build:
+    runs-on: ubuntu-latest
+    needs: quality-gates
+    if: needs.quality-gates.outputs.gates-passed == 'true'
+    
+    strategy:
+      matrix:
+        component: [api, frontend, worker]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      if: matrix.component == 'api' || matrix.component == 'worker'
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Setup Node.js
+      if: matrix.component == 'frontend'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Build API
+      if: matrix.component == 'api'
+      run: |
+        pip install -r requirements.txt
+        pip install -r requirements-build.txt
+        python setup.py sdist bdist_wheel
+    
+    - name: Build Frontend
+      if: matrix.component == 'frontend'
+      run: |
+        cd frontend
+        npm ci
+        npm run build
+        npm run test:unit
+    
+    - name: Build Worker
+      if: matrix.component == 'worker'
+      run: |
+        pip install -r requirements.txt
+        pip install -r requirements-build.txt
+        python setup.py sdist bdist_wheel
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-${{ matrix.component }}
+        path: |
+          dist/
+          frontend/dist/
+        retention-days: 7
+
+  # Deploy to Staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [build, quality-gates]
+    if: |
+      needs.quality-gates.outputs.gates-passed == 'true' && 
+      (github.event.inputs.deploy_to_staging == 'true' || github.ref == 'refs/heads/develop')
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: build-artifacts/
+    
+    - name: Deploy to staging
+      run: |
+        echo "Deploying to staging environment..."
+        # Add deployment logic here
+        # This would typically involve:
+        # - Pushing Docker images to registry
+        # - Updating Kubernetes deployments
+        # - Running database migrations
+        # - Health checks
+    
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests..."
+        # Add smoke test logic here
+    
+    - name: Notify deployment
+      uses: 8398a7/action-slack@v3
+      if: always()
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+
+  # Deploy to Production
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [build, quality-gates, deploy-staging]
+    if: |
+      needs.quality-gates.outputs.gates-passed == 'true' && 
+      github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: build-artifacts/
+    
+    - name: Deploy to production
+      run: |
+        echo "Deploying to production environment..."
+        # Add production deployment logic here
+    
+    - name: Run production health checks
+      run: |
+        echo "Running production health checks..."
+        # Add health check logic here
+    
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+  # Monitoring and Alerting
+  monitoring:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always() && (needs.deploy-staging.result == 'success' || needs.deploy-production.result == 'success')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup monitoring
+      run: |
+        pip install -r requirements.txt
+        pip install prometheus-client grafana-api
+    
+    - name: Update monitoring dashboards
+      run: |
+        python ml-model-api/monitoring_system.py
+    
+    - name: Check system health
+      run: |
+        python -c "
+        import requests
+        import sys
+        try:
+            response = requests.get('https://staging.flavorsnap.ai/health', timeout=10)
+            if response.status_code == 200:
+                print('Health check passed')
+            else:
+                print(f'Health check failed: {response.status_code}')
+                sys.exit(1)
+        except Exception as e:
+            print(f'Health check error: {e}')
+            sys.exit(1)
+        "
+    
+    - name: Send notifications
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#alerts'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+
+  # Cleanup
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    
+    steps:
+    - name: Cleanup old artifacts
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            run_id: context.runId,
+          });
+          
+          const oldArtifacts = artifacts.data.artifacts.filter(artifact => {
+            const created = new Date(artifact.created_at);
+            const daysOld = (Date.now() - created) / (1000 * 60 * 60 * 24);
+            return daysOld > 30;
+          });
+          
+          for (const artifact of oldArtifacts) {
+            await github.rest.actions.deleteArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: artifact.id,
+            });
+            console.log(`Deleted artifact: ${artifact.name}`);
+          }

@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    k8s-app: cluster-autoscaler
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-autoscaler
+  labels:
+    k8s-app: cluster-autoscaler
+rules:
+- apiGroups: [""]
+  resources: ["events", "endpoints"]
+  verbs: ["create", "patch", "update"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "update", "delete"]
+- apiGroups: [""]
+  resources: ["pods/eviction"]
+  verbs: ["create"]
+- apiGroups: ["apps"]
+  resources: ["daemonsets", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csinodes", "csidrivers", "csistoragecapacities"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses", "csistoragecapacities"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-autoscaler
+  labels:
+    k8s-app: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler
+subjects:
+- kind: ServiceAccount
+  name: cluster-autoscaler
+  namespace: kube-system
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      containers:
+      - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.28.0
+        name: cluster-autoscaler
+        resources:
+          limits:
+            cpu: 100m
+            memory: 300Mi
+          requests:
+            cpu: 100m
+            memory: 300Mi
+        command:
+        - ./cluster-autoscaler
+        - --v=4
+        - --stderrthreshold=info
+        - --cloud-provider=aws
+        - --skip-nodes-with-local-storage=false
+        - --expander=least-waste
+        - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/flavorsnap
+        - --balance-similar-node-groups
+        - --skip-nodes-with-system-pods=false
+        - --expander-priority=least-waste,random,most-pods
+        - --max-node-provision-time=15m
+        - --ok-total-unready-count=3
+        - --scale-down-unneeded-time=10m
+        - --scale-down-unready-time=20m
+        - --scale-down-delay-after-add=10m
+        - --scale-down-delay-after-delete=0s
+        - --scale-down-unready-time=10m
+        - --cluster-name=flavorsnap-cluster
+        - --skip-nodes-with-local-storage=false
+        - --write-status-configmap=true
+        - --expander=least-waste
+        - --max-empty-bulk-delete=3
+        - --max-graceful-termination-sec=600
+        - --max-total-unready-percentage=45
+        - --new-pod-scale-up-delay=0s
+        - --scale-down-delay-after-add=3m
+        - --scale-down-delay-after-delete=0s
+        - --scale-down-delay-after-failure=3m
+        - --scale-down-unneeded-time=10m
+        - --unremovable-node-recheck-timeout=5m
+        - --use-node-group-auto-discovery=true
+        - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/flavorsnap
+        - --balance-similar-node-groups=true
+        - --skip-nodes-with-system-pods=false
+        - --expander=least-waste
+        - --max-node-provision-time=15m
+        - --ok-total-unready-count=3
+        - --scale-down-unneeded-time=10m
+        - --scale-down-unready-time=20m
+        - --scale-down-delay-after-add=10m
+        - --scale-down-delay-after-delete=0s
+        - --scale-down-unready-time=10m
+        - --cluster-name=flavorsnap-cluster
+        - --skip-nodes-with-local-storage=false
+        - --write-status-configmap=true
+        - --expander=least-waste
+        - --max-empty-bulk-delete=3
+        - --max-graceful-termination-sec=600
+        - --max-total-unready-percentage=45
+        - --new-pod-scale-up-delay=0s
+        - --scale-down-delay-after-add=3m
+        - --scale-down-delay-after-delete=0s
+        - --scale-down-delay-after-failure=3m
+        - --scale-down-unneeded-time=10m
+        - --unremovable-node-recheck-timeout=5m
+        - --use-node-group-auto-discovery=true
+        - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/flavorsnap
+        - --balance-similar-node-groups=true
+        - --skip-nodes-with-system-pods=false
+        - --expander=least-waste
+        - --max-node-provision-time=15m
+        - --ok-total-unready-count=3
+        - --scale-down-unneeded-time=10m
+        - --scale-down-unready-time=20m
+        - --scale-down-delay-after-add=10m
+        - --scale-down-delay-after-delete=0s
+        - --scale-down-unready-time=10m
+        - --cluster-name=flavorsnap-cluster
+        - --skip-nodes-with-local-storage=false
+        - --write-status-configmap=true
+        - --expander=least-waste
+        - --max-empty-bulk-delete=3
+        - --max-graceful-termination-sec=600
+        - --max-total-unready-percentage=45
+        - --new-pod-scale-up-delay=0s
+        - --scale-down-delay-after-add=3m
+        - --scale-down-delay-after-delete=0s
+        - --scale-down-delay-after-failure=3m
+        - --scale-down-unneeded-time=10m
+        - --unremovable-node-recheck-timeout=5m
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-status
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-autoscaler-metrics
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8085"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: cluster-autoscaler
+  ports:
+  - port: 8085
+    targetPort: 8085
+    name: metrics
+  type: ClusterIP

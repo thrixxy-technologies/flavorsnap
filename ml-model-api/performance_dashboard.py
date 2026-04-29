@@ -3,19 +3,24 @@ Performance Dashboard for FlavorSnap Model Management
 Provides visualization and comparison of model performance metrics
 """
 
-import panel as pn
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-import sqlite3
-from typing import Dict, List, Any
 import json
+from typing import Dict, Any
+from datetime import datetime
 
-from model_registry import ModelRegistry
-from ab_testing import ABTestManager
+try:
+    import panel as pn
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    import pandas as pd
+    import numpy as np
+    import sqlite3
+    from model_registry import ModelRegistry
+    from ab_testing import ABTestManager
+    DASHBOARD_AVAILABLE = True
+except ImportError as e:
+    print(f"Dashboard dependencies not available: {e}")
+    DASHBOARD_AVAILABLE = False
 
 
 class ModelPerformanceDashboard:
@@ -469,15 +474,84 @@ class ModelPerformanceDashboard:
 
 def create_dashboard():
     """Create and serve the dashboard"""
-    # Initialize components
-    model_registry = ModelRegistry()
-    ab_test_manager = ABTestManager(model_registry)
+    if not DASHBOARD_AVAILABLE:
+        return create_simple_dashboard()
     
-    # Create dashboard
-    dashboard = ModelPerformanceDashboard(model_registry, ab_test_manager)
+    try:
+        # Initialize components
+        model_registry = ModelRegistry()
+        ab_test_manager = ABTestManager(model_registry)
+        
+        # Create dashboard
+        dashboard = ModelPerformanceDashboard(model_registry, ab_test_manager)
+        
+        # Serve
+        return dashboard.serve()
+    except Exception as e:
+        print(f"Error creating full dashboard: {e}")
+        return create_simple_dashboard()
+
+
+def create_simple_dashboard():
+    """Create a simple HTML dashboard when full dependencies aren't available"""
     
-    # Serve
-    return dashboard.serve()
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>FlavorSnap Performance Dashboard</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #333; border-bottom: 3px solid #007bff; padding-bottom: 10px; }
+            .metric { background: #f8f9fa; padding: 20px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #007bff; }
+            .endpoint { background: #e9ecef; padding: 15px; margin: 10px 0; border-radius: 5px; font-family: monospace; }
+            .status { color: #28a745; font-weight: bold; }
+            .warning { color: #ffc107; font-weight: bold; }
+            .error { color: #dc3545; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🍲 FlavorSnap Performance Dashboard</h1>
+            <p><strong>Status:</strong> <span class="warning">Limited Mode</span> - Full dashboard requires additional dependencies</p>
+            
+            <div class="metric">
+                <h3>📊 Available Monitoring Endpoints</h3>
+                <div class="endpoint">GET /metrics - Prometheus metrics</div>
+                <div class="endpoint">GET /health/detailed - Detailed system health</div>
+                <div class="endpoint">GET /api/info - API information</div>
+            </div>
+            
+            <div class="metric">
+                <h3>🔧 Installation Instructions</h3>
+                <p>To enable the full interactive dashboard, install the required dependencies:</p>
+                <div class="endpoint">pip install -r requirements-monitoring.txt</div>
+            </div>
+            
+            <div class="metric">
+                <h3>📈 Current Metrics</h3>
+                <p>• HTTP Request Count: Available via /metrics</p>
+                <p>• Request Duration: Available via /metrics</p>
+                <p>• Model Inference Metrics: Available via /metrics</p>
+                <p>• System Resources: Available via /health/detailed</p>
+            </div>
+            
+            <div class="metric">
+                <h3>🚀 Quick Start</h3>
+                <p>1. Install monitoring dependencies: <code>pip install prometheus-client psutil</code></p>
+                <p>2. Visit <a href="/metrics">/metrics</a> to see Prometheus metrics</p>
+                <p>3. Visit <a href="/health/detailed">/health/detailed</a> for system health</p>
+            </div>
+            
+            <p><small>Dashboard generated at: """ + datetime.now().isoformat() + """</small></p>
+        </div>
+    </body>
+    </html>
+    """
+    
+    from flask import Response
+    return Response(html_content, mimetype='text/html')
 
 
 if __name__ == "__main__":

@@ -1,85 +1,262 @@
 version: '3.8'
 
 services:
-  # Frontend development service
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend.dev
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./frontend:/app/frontend
-      - /app/frontend/node_modules
-      - /app/frontend/.next
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: flavorsnap-postgres
     environment:
-      - NODE_ENV=development
-      - NEXT_PUBLIC_API_URL=http://backend:5000
-      - NEXT_PUBLIC_MODEL_ENDPOINT=/predict
-    depends_on:
-      - backend
+      POSTGRES_DB: flavorsnap
+      POSTGRES_USER: flavorsnap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flavorsnap123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
     networks:
       - flavorsnap-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flavorsnap -d flavorsnap"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
-  # Backend ML API service
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    ports:
-      - "5000:5000"
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: flavorsnap-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis123}
     volumes:
-      - ./ml-model-api:/app/ml-model-api
-      - ./model.pth:/app/model.pth
-      - ./uploads:/app/uploads
-      - ./logs:/app/logs
-    environment:
-      - FLASK_ENV=development
-      - FLASK_DEBUG=1
-      - PYTHONPATH=/app
+      - redis_data:/data
+    ports:
+      - "6379:6379"
     networks:
       - flavorsnap-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
+
+  # Blue Environment (ML API)
+  flavorsnap-blue:
+    build:
+      context: ./ml-model-api
+      dockerfile: Dockerfile
+    container_name: flavorsnap-blue
+    environment:
+      - FLASK_ENV=production
+      - DEPLOYMENT_COLOR=blue
+      - DATABASE_URL=postgresql://flavorsnap:${POSTGRES_PASSWORD:-flavorsnap123}@postgres:5432/flavorsnap
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      - APP_HOST=0.0.0.0
+      - APP_PORT=5000
+    volumes:
+      - ./ml-model-api/uploads:/app/uploads
+      - ./ml-model-api/logs:/app/logs
+      - ./ml-model-api/reports:/app/reports
+      - ./model.pth:/app/model.pth:ro
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "5001:5000"
+    networks:
+      - flavorsnap-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-
-  # Redis for caching (optional)
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - flavorsnap-network
+      start_period: 40s
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    profiles:
+      - blue
+      - full
 
-  # PostgreSQL for data persistence (optional)
-  postgres:
-    image: postgres:15-alpine
+  # Green Environment (ML API)
+  flavorsnap-green:
+    build:
+      context: ./ml-model-api
+      dockerfile: Dockerfile
+    container_name: flavorsnap-green
     environment:
-      POSTGRES_DB: flavorsnap
-      POSTGRES_USER: flavorsnap
-      POSTGRES_PASSWORD: flavorsnap_dev
-    ports:
-      - "5432:5432"
+      - FLASK_ENV=production
+      - DEPLOYMENT_COLOR=green
+      - DATABASE_URL=postgresql://flavorsnap:${POSTGRES_PASSWORD:-flavorsnap123}@postgres:5432/flavorsnap
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      - APP_HOST=0.0.0.0
+      - APP_PORT=5000
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ./ml-model-api/uploads:/app/uploads
+      - ./ml-model-api/logs:/app/logs
+      - ./ml-model-api/reports:/app/reports
+      - ./model.pth:/app/model.pth:ro
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "5002:5000"
+    networks:
+      - flavorsnap-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    profiles:
+      - green
+      - full
+
+  # Nginx Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: flavorsnap-nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ml-model-api/logs/nginx:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - flavorsnap-network
+    depends_on:
+      - flavorsnap-blue
+      - flavorsnap-green
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    profiles:
+      - full
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: flavorsnap-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
     networks:
       - flavorsnap-network
     restart: unless-stopped
+    profiles:
+      - monitoring
+      - full
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: flavorsnap-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - flavorsnap-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+      - full
+
+  # Celery Worker (for async processing)
+  celery-worker:
+    build:
+      context: ./ml-model-api
+      dockerfile: Dockerfile
+    container_name: flavorsnap-celery-worker
+    command: celery -A app.celery worker --loglevel=info --concurrency=4
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=postgresql://flavorsnap:${POSTGRES_PASSWORD:-flavorsnap123}@postgres:5432/flavorsnap
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+    volumes:
+      - ./ml-model-api/uploads:/app/uploads
+      - ./ml-model-api/logs:/app/logs
+      - ./model.pth:/app/model.pth:ro
+      - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - flavorsnap-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - workers
+      - full
+
+  # Celery Beat (for scheduled tasks)
+  celery-beat:
+    build:
+      context: ./ml-model-api
+      dockerfile: Dockerfile
+    container_name: flavorsnap-celery-beat
+    command: celery -A app.celery beat --loglevel=info
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=postgresql://flavorsnap:${POSTGRES_PASSWORD:-flavorsnap123}@postgres:5432/flavorsnap
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+    volumes:
+      - ./ml-model-api/logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - flavorsnap-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - workers
+      - full
 
 volumes:
-  redis_data:
   postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
 
 networks:
   flavorsnap-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

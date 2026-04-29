@@ -17,5 +17,15 @@
   "language_yo": "Yorùbá",
   "error_classify_retry": "Échec de la classification. Veuillez réessayer.",
   "classify_food": "Classifier le plat",
-  "classification_result": "Résultat de la classification"
+  "classification_result": "Résultat de la classification",
+  "shortcut_hint": "Appuyez sur 'O' pour ouvrir la caméra, 'C' pour classifier, 'R' pour réinitialiser",
+  "clear_image": "Effacer l'image",
+  "reset": "Réinitialiser",
+  "history": "Historique",
+  "export_json": "Exporter JSON",
+  "export_csv": "Exporter CSV",
+  "clear_history": "Effacer l'historique",
+  "no_history_yet": "Vos aliments classés apparaîtront ici.",
+  "confirm_clear_history": "Voulez-vous vraiment effacer votre historique de classification ?"
+  "reset": "Réinitialiser"
 }

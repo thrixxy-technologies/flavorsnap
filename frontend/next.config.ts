@@ -1,96 +1,101 @@
 import type { NextConfig } from "next";
-import crypto from 'crypto';
+import crypto from "crypto";
 
-// 1. Properly import the i18n configuration
-const { i18n } = require("./next-i18next.config.js");
+const ContentSecurityPolicy = `
+  default-src 'self';
+  script-src 'self' 'unsafe-inline' 'unsafe-eval';
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' blob: data:;
+  font-src 'self';
+  object-src 'none';
+  base-uri 'self';
+  form-action 'self';
+  frame-ancestors 'none';
+  connect-src 'self' http://localhost:* https://*;
+`;
 
-// Generate nonce function for CSP
-const generateNonce = () => crypto.randomBytes(16).toString('base64');
+const securityHeaders = [
+  {
+    key: 'Content-Security-Policy',
+    value: ContentSecurityPolicy.replace(/\s{2,}/g, ' ').trim()
+  },
+  {
+    key: 'X-DNS-Prefetch-Control',
+    value: 'on'
+  },
+  {
+    key: 'Strict-Transport-Security',
+    value: 'max-age=63072000; includeSubDomains; preload'
+  },
+  {
+    key: 'X-Frame-Options',
+    value: 'SAMEORIGIN'
+  },
+  {
+    key: 'X-Content-Type-Options',
+    value: 'nosniff'
+  },
+  {
+    key: 'Referrer-Policy',
+    value: 'origin-when-cross-origin'
+  },
+  {
+    key: 'Permissions-Policy',
+    value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()'
+  }
+];
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  i18n,
-  
-  // Security headers and CSP
+  swcMinify: true,
+  compiler: {
+    removeConsole: process.env.NODE_ENV === 'production',
+  },
+  experimental: {
+    optimizePackageImports: ['lucide-react', 'recharts', 'framer-motion'],
+  },
   async headers() {
-    const nonce = generateNonce();
-    
     return [
       {
         source: '/(.*)',
-        headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: [
-              `default-src 'self';`,
-              `script-src 'self' 'nonce-${nonce}' https://vercel.live https://www.googletagmanager.com;`,
-              `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;`,
-              `font-src 'self' https://fonts.gstatic.com;`,
-              `img-src 'self' data: blob: https:;`,
-              `connect-src 'self' https://api.openai.com https://vercel.live https://www.google-analytics.com;`,
-              `frame-src 'none';`,
-              `object-src 'none';`,
-              `base-uri 'self';`,
-              `form-action 'self';`,
-              `upgrade-insecure-requests;`
-            ].join(' ')
-          },
-          {
-            key: 'X-Content-Type-Options',
-            value: 'nosniff'
-          },
-          {
-            key: 'X-Frame-Options',
-            value: 'DENY'
-          },
-          {
-            key: 'X-XSS-Protection',
-            value: '1; mode=block'
-          },
-          {
-            key: 'Referrer-Policy',
-            value: 'strict-origin-when-cross-origin'
-          },
-          {
-            key: 'Permissions-Policy',
-            value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()'
-          },
-          {
-            key: 'Strict-Transport-Security',
-            value: 'max-age=31536000; includeSubDomains; preload'
-          }
-        ]
+        headers: securityHeaders,
       },
-      {
-        // API routes get different CSP
-        source: '/api/(.*)',
-        headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: "default-src 'self'; script-src 'self'; style-src 'self';"
-          }
-        ]
-      }
     ];
   },
-  
-  // Environment variables for nonce (passed to client)
-  env: {
-    CSP_NONCE: generateNonce()
-  },
-  
-  // Webpack configuration to pass nonce to client
   webpack: (config, { isServer }) => {
     if (!isServer) {
-      config.plugins.push(
-        new config.webpack.DefinePlugin({
-          'process.env.CSP_NONCE': JSON.stringify(generateNonce())
-        })
-      );
+      config.optimization.splitChunks = {
+        chunks: 'all',
+        maxInitialRequests: 25,
+        minSize: 20000,
+        cacheGroups: {
+          default: false,
+          vendors: false,
+          framework: {
+            chunks: 'all',
+            name: 'framework',
+            test: /(?<!node_modules.*)[\\/]node_modules[\\/](react|react-dom|scheduler|prop-types|use-subscription)[\\/]/,
+            priority: 40,
+            enforce: true,
+          },
+          lib: {
+            test(module: any) {
+              return module.size() > 160000 && /node_modules[\\/]/.test(module.identifier());
+            },
+            name(module: any) {
+              const hash = crypto.createHash('sha1');
+              hash.update(module.identifier());
+              return hash.digest('hex').substring(0, 8);
+            },
+            priority: 30,
+            minChunks: 1,
+            reuseExistingChunk: true,
+          },
+        },
+      };
     }
     return config;
-  }
+  },
 };
 
-// 2. Export the config directly to bypass the missing PWA dependencies
 export default nextConfig;

@@ -225,11 +225,13 @@ This document provides a comprehensive breakdown of every file and directory in 
 | File | Purpose | Responsibilities | Dependencies |
 |------|---------|------------------|--------------|
 | `docs/project_structure.md` | Structure docs | Project organization guide | - |
+| `docs/blockchain.md` | Blockchain docs | Decentralized architecture and governance | Stellar/Soroban |
 | `docs/development_workflow.md` | Workflow guide | Development process documentation | - |
 | `docs/file_purposes.md` | File purposes | This file - file responsibilities | - |
 | `docs/installation.md` | Installation guide | Setup and installation instructions | - |
 | `docs/configuration.md` | Configuration guide | Configuration options and settings | - |
 | `docs/troubleshooting.md` | Troubleshooting | Common issues and solutions | - |
+| `contracts/README.md` | Contract docs | Technical guide for smart contracts | Soroban |
 
 ### Additional Documentation
 

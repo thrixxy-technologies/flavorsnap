@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="FlavorSnap - AI-powered food classification app with offline support">
+    <meta name="theme-color" content="#2196F3">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="FlavorSnap">
+    <meta name="application-name" content="FlavorSnap">
+    <meta name="msapplication-TileColor" content="#2196F3">
+    <meta name="msapplication-config" content="/static/browserconfig.xml">
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/static/manifest.json">
+    
+    <!-- Apple Touch Icons -->
+    <link rel="apple-touch-icon" href="/static/icons/icon-192x192.png">
+    <link rel="apple-touch-icon" sizes="152x152" href="/static/icons/icon-152x152.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/icon-180x180.png">
+    <link rel="apple-touch-icon" sizes="167x167" href="/static/icons/icon-167x167.png">
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/icon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/icons/icon-16x16.png">
+    <link rel="shortcut icon" href="/static/icons/icon-16x16.png">
+    
+    <!-- PWA Styles -->
+    <link rel="stylesheet" href="/static/css/pwa.css">
+    
+    <title>FlavorSnap - AI Food Classification</title>
+    
+    <style>
+        /* Basic PWA styling */
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #f5f5f5;
+        }
+        
+        /* Offline indicator styles */
+        .offline-indicator {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        
+        .online-indicator {
+            background-color: #4CAF50;
+            color: white;
+        }
+        
+        .offline-indicator.offline {
+            background-color: #FF9800;
+            color: white;
+        }
+        
+        /* Install button styles */
+        .pwa-install-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 16px;
+            background-color: #2196F3;
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .pwa-install-btn:hover {
+            background-color: #1976D2;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        }
+        
+        .pwa-install-btn:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        /* Loading screen for PWA */
+        .splash-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #2196F3;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            transition: opacity 0.5s ease;
+        }
+        
+        .splash-screen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .splash-icon {
+            width: 120px;
+            height: 120px;
+            margin-bottom: 20px;
+            animation: pulse 2s infinite;
+        }
+        
+        .splash-text {
+            color: white;
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        
+        .splash-subtitle {
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 16px;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        
+        /* Offline banner */
+        .offline-banner {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background-color: #FF9800;
+            color: white;
+            text-align: center;
+            padding: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            z-index: 1000;
+            transform: translateY(-100%);
+            transition: transform 0.3s ease;
+        }
+        
+        .offline-banner.show {
+            transform: translateY(0);
+        }
+        
+        /* Responsive design */
+        @media (max-width: 768px) {
+            .splash-text {
+                font-size: 20px;
+            }
+            
+            .splash-subtitle {
+                font-size: 14px;
+            }
+            
+            #pwa-status {
+                top: 5px;
+                right: 5px;
+            }
+        }
+        
+        /* Safe area insets for mobile devices */
+        @supports (padding: max(0px)) {
+            .pwa-status {
+                padding-right: max(10px, env(safe-area-inset-right));
+                padding-top: max(10px, env(safe-area-inset-top));
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Splash Screen -->
+    <div id="splash-screen" class="splash-screen">
+        <div class="splash-icon">🍲</div>
+        <div class="splash-text">FlavorSnap</div>
+        <div class="splash-subtitle">AI Food Classification</div>
+    </div>
+    
+    <!-- Offline Banner -->
+    <div id="offline-banner" class="offline-banner">
+        📱 You're offline. Some features may be limited.
+    </div>
+    
+    <!-- Main App Content -->
+    <div id="app">
+        <app-root></app-root>
+    </div>
+    
+    <!-- PWA JavaScript -->
+    <script>
+        // Hide splash screen when app is ready
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                const splashScreen = document.getElementById('splash-screen');
+                if (splashScreen) {
+                    splashScreen.classList.add('hidden');
+                    setTimeout(() => {
+                        splashScreen.style.display = 'none';
+                    }, 500);
+                }
+            }, 1500);
+        });
+        
+        // Show/hide offline banner
+        function updateOfflineStatus() {
+            const offlineBanner = document.getElementById('offline-banner');
+            const connectionStatus = document.getElementById('connection-status');
+            
+            if (!navigator.onLine) {
+                offlineBanner.classList.add('show');
+                if (connectionStatus) {
+                    connectionStatus.textContent = '📱 Offline';
+                    connectionStatus.classList.add('offline');
+                }
+            } else {
+                offlineBanner.classList.remove('show');
+                if (connectionStatus) {
+                    connectionStatus.textContent = '🌐 Online';
+                    connectionStatus.classList.remove('offline');
+                }
+            }
+        }
+        
+        // Listen for online/offline events
+        window.addEventListener('online', updateOfflineStatus);
+        window.addEventListener('offline', updateOfflineStatus);
+        
+        // Initial status check
+        updateOfflineStatus();
+        
+        // Service Worker registration
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/static/sw.js')
+                    .then((registration) => {
+                        console.log('Service Worker registered:', registration);
+                        
+                        // Check for service worker updates
+                        registration.addEventListener('updatefound', () => {
+                            const newWorker = registration.installing;
+                            newWorker.addEventListener('statechange', () => {
+                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                    // Show update notification
+                                    if (confirm('New version available! Reload to update?')) {
+                                        window.location.reload();
+                                    }
+                                }
+                            });
+                        });
+                    })
+                    .catch((error) => {
+                        console.error('Service Worker registration failed:', error);
+                    });
+            });
+        }
+        
+        // PWA Install Prompt
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            
+            // Show install button
+            const installButton = document.getElementById('pwa-install-button');
+            if (installButton) {
+                installButton.style.display = 'inline-block';
+            }
+        });
+        
+        // Handle install button click
+        document.addEventListener('click', (e) => {
+            if (e.target && e.target.id === 'pwa-install-button') {
+                if (deferredPrompt) {
+                    deferredPrompt.prompt();
+                    deferredPrompt.userChoice.then((choiceResult) => {
+                        if (choiceResult.outcome === 'accepted') {
+                            console.log('User accepted the install prompt');
+                        } else {
+                            console.log('User dismissed the install prompt');
+                        }
+                        deferredPrompt = null;
+                        
+                        // Hide install button
+                        const installButton = document.getElementById('pwa-install-button');
+                        if (installButton) {
+                            installButton.style.display = 'none';
+                        }
+                    });
+                }
+            }
+        });
+        
+        // Handle app installed event
+        window.addEventListener('appinstalled', (evt) => {
+            console.log('PWA was installed');
+            
+            // Hide install button if still visible
+            const installButton = document.getElementById('pwa-install-button');
+            if (installButton) {
+                installButton.style.display = 'none';
+            }
+        });
+        
+        // Performance monitoring
+        window.addEventListener('load', () => {
+            if ('performance' in window && 'getEntriesByType' in performance) {
+                const perfEntries = performance.getEntriesByType('navigation');
+                if (perfEntries.length > 0) {
+                    const loadTime = perfEntries[0].loadEventEnd - perfEntries[0].loadEventStart;
+                    console.log(`Page load time: ${loadTime}ms`);
+                }
+            }
+        });
+        
+        // Handle visibility change for background sync
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && 'serviceWorker' in navigator) {
+                navigator.serviceWorker.ready.then((registration) => {
+                    if ('sync' in registration) {
+                        // Trigger background sync
+                        registration.sync.register('background-sync');
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>

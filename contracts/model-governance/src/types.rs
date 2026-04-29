@@ -13,6 +13,13 @@ pub enum DataKey {
     VotingPeriod,          // Voting period in seconds
     MinStake,              // Minimum stake for proposal submission
     TokenHolders,          // List of all addresses with non-zero token balances
+    Delegations(Address),  // Address -> Delegation info
+    VotingPowerSnapshot(u32), // Proposal ID -> Voting power snapshots
+    TimelockDelay,         // Delay before execution
+    EmergencyProposals,    // Emergency proposal tracking
+    ProposalHistory,       // Historical proposal data
+    ContractVersion,       // Contract version for upgrades
+    Paused,                // Contract pause state
 }
 /// Represents a proposal for AI model updates or dataset expansions
 #[contracttype]
@@ -27,6 +34,9 @@ pub struct Proposal {
     pub no_votes: u32,  // Total no vote weight
     pub timestamp: u64, // Submission timestamp
     pub executed: bool, // Whether the proposal has been executed
+    pub execution_time: u64, // Time when proposal can be executed (for timelock)
+    pub proposal_type: ProposalType, // Type of proposal
+    pub voting_power_used: u32, // Total voting power used
 }
 
 /// Represents a vote cast by a token holder
@@ -36,6 +46,18 @@ pub struct Vote {
     pub voter: Address,
     pub in_favor: bool,
     pub weight: u32, // Vote weight based on token balance
+    pub timestamp: u64, // When the vote was cast
+    pub delegated_to: Option<Address>, // If vote was delegated
+}
+
+/// Vote delegation structure
+#[contracttype]
+#[derive(Clone)]
+pub struct Delegation {
+    pub delegator: Address,
+    pub delegate: Address,
+    pub timestamp: u64,
+    pub weight: u32,
 }
 
 /// Status of a proposal
@@ -46,4 +68,27 @@ pub enum ProposalStatus {
     Approved,
     Rejected,
     Cancelled,
+    Executed,
+    Expired,
+}
+
+/// Types of proposals
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProposalType {
+    ModelUpdate,
+    DatasetExpansion,
+    ParameterChange,
+    Emergency,
+    Upgrade,
+}
+
+/// Voting power snapshot
+#[contracttype]
+#[derive(Clone)]
+pub struct VotingPowerSnapshot {
+    pub address: Address,
+    pub power: u32,
+    pub timestamp: u64,
+    pub delegated: bool,
 }
