@@ -1,0 +1,64 @@
+{
+  "common": {
+    "loading": "Loading...",
+    "error": "Something went wrong",
+    "retry": "Try Again",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "close": "Close",
+    "confirm": "Confirm",
+    "back": "Back",
+    "next": "Next",
+    "search": "Search",
+    "filter": "Filter",
+    "sort": "Sort",
+    "export": "Export",
+    "refresh": "Refresh",
+    "noData": "No data available",
+    "noResults": "No results found",
+    "success": "Success",
+    "warning": "Warning",
+    "info": "Information"
+  },
+  "analytics": {
+    "title": "Analytics Dashboard",
+    "totalClassifications": "Total Classifications",
+    "accuracy": "Model Accuracy",
+    "avgConfidence": "Average Confidence",
+    "recentPredictions": "Recent Predictions",
+    "modelPerformance": "Model Performance",
+    "classDistribution": "Class Distribution",
+    "timeRange": "Time Range",
+    "last7Days": "Last 7 Days",
+    "last30Days": "Last 30 Days",
+    "allTime": "All Time"
+  },
+  "navigation": {
+    "home": "Home",
+    "analytics": "Analytics",
+    "history": "History",
+    "settings": "Settings",
+    "about": "About",
+    "help": "Help"
+  },
+  "upload": {
+    "title": "Upload Image",
+    "dragDrop": "Drag and drop an image here",
+    "browse": "or click to browse",
+    "supportedFormats": "Supported formats: JPG, PNG, WebP",
+    "maxSize": "Maximum size: 10MB",
+    "analyzing": "Analyzing image...",
+    "result": "Classification Result",
+    "confidence": "Confidence",
+    "predictedClass": "Predicted Class"
+  },
+  "language": {
+    "label": "Language",
+    "english": "English",
+    "french": "Francais",
+    "spanish": "Espanol",
+    "german": "Deutsch"
+  }
+}
